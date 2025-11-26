@@ -437,12 +437,19 @@ def get_framework_runners() -> Dict[str, BaseFrameworkRunner]:
     except Exception as e:
         print(f"Swarm runner not available: {e}")
     
-    # Add compensation runner
+    # Add compensation runner (custom integration)
     try:
         from .compensation_runner import CompensationLangGraphRunner
         runners['compensation'] = CompensationLangGraphRunner()
     except Exception as e:
         print(f"Compensation runner not available: {e}")
+
+    # Add compensation_lib runner (direct langchain-compensation)
+    try:
+        from .compensation_runner_lib import CompensationLibRunner
+        runners['compensation_lib'] = CompensationLibRunner()
+    except Exception as e:
+        print(f"CompensationLib runner not available: {e}")
 
     # Add SagaLLM runner
     try:
@@ -494,4 +501,4 @@ def create_mock_runner(framework_name: str) -> BaseFrameworkRunner:
                 schedule=schedule
             )
     
-    return MockRunner(framework_name) 
+    return MockRunner(framework_name)
