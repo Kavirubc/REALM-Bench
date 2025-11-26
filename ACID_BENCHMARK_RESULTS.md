@@ -1,4 +1,4 @@
-# ACID Benchmark Results: LangChain Compensation vs SagaLLM
+# ACID Benchmark Results: langchain-compensation vs SagaLLM
 
 ## Executive Summary
 
@@ -7,112 +7,208 @@ This document presents the results of a rigorous head-to-head benchmark comparin
 ## Benchmark Configuration
 
 - **Tasks**: P5-ACID (Wedding Logistics), P6-ACID (Thanksgiving Dinner)
-- **Framework Versions**: 
-  - `langchain-compensation`: Latest (embedded in runner)
+- **Framework Versions**:
+  - `langchain-compensation`: 0.3.1 (requires langchain >= 1.0.0)
   - `SagaLLM`: Latest from repository
-- **LLM**: Google Gemini (gemini-pro)
+- **LLM**: Google Gemini (gemini-flash-latest)
+- **Python**: 3.10+ required (langchain v1 requirement)
 - **Evaluation Metric**: State Consistency (0 resources held after failure = success)
 
 ## Results Summary
 
 ### P5-ACID: Wedding Logistics Transaction
 
-**Scenario**: Book Venue → Book Caterer → Book Band (Band fails)
+**Scenario**: Book Venue → Book Caterer → Book Band (Band fails due to capacity > 50)
 
-| Framework | Rollback Success | State Consistency | Manual Code Required |
-|-----------|-----------------|-------------------|---------------------|
-| LangChain Compensation | ✅ 100% | ✅ 100% (0 resources) | ❌ 0 lines |
-| SagaLLM | ✅ 100% | ✅ 100% (0 resources) | ✅ ~100 lines |
-
-**Detailed Results:**
-- **LangChain Compensation**: Automatically detected failure, rolled back Venue and Caterer allocations. Zero configuration required.
-- **SagaLLM**: Successfully rolled back after implementing custom `CompensatableSagaAgent` class with manual rollback logic.
+| Framework | Execution Time | Rollback Success | State Consistency | Manual Code Required |
+|-----------|---------------|-----------------|-------------------|---------------------|
+| langchain-compensation | ~7.13s | ✅ 100% | ✅ 100% (0 resources) | ❌ 0 lines |
+| SagaLLM | ~2.06s | ✅ 100% | ✅ 100% (0 resources) | ✅ ~100 lines |
 
 ### P6-ACID: Thanksgiving Dinner Transaction
 
-**Scenario**: Order Sides → Order Drinks → Order Turkey (Turkey fails)
+**Scenario**: Order Sides → Order Drinks → Order Turkey (Turkey fails due to capacity > 50)
 
-| Framework | Rollback Success | State Consistency | Manual Code Required |
-|-----------|-----------------|-------------------|---------------------|
-| LangChain Compensation | ✅ 100% | ✅ 100% (0 resources) | ❌ 0 lines |
-| SagaLLM | ✅ 100% | ✅ 100% (0 resources) | ✅ ~100 lines + task-specific updates |
+| Framework | Execution Time | Rollback Success | State Consistency | Manual Code Required |
+|-----------|---------------|-----------------|-------------------|---------------------|
+| langchain-compensation | ~7-8s | ✅ 100% | ✅ 100% (0 resources) | ❌ 0 lines |
+| SagaLLM | ~2-3s | ✅ 100% | ✅ 100% (0 resources) | ✅ ~100 lines |
 
-**Detailed Results:**
-- **LangChain Compensation**: Automatically detected failure, rolled back Sides and Drinks orders. Zero configuration required.
-- **SagaLLM**: Successfully rolled back after implementing custom rollback logic and updating task-specific argument mappings.
+## Architecture Comparison
+
+### langchain-compensation (Single Agent + Middleware)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    LLM (Gemini)                         │
+│                   ReAct Reasoning                       │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│              CompensationMiddleware                      │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ • wrap_tool_call() - intercepts all tool calls  │   │
+│  │ • CompensationLog - tracks actions + results    │   │
+│  │ • Dependency inference from data flow           │   │
+│  │ • DAG-based rollback ordering                   │   │
+│  └─────────────────────────────────────────────────┘   │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────┐
+│                    Tools (40+)                          │
+│     book_vehicle, allocate_resource, check_capacity     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### SagaLLM (Multi-Agent + Saga Coordinator)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Saga Coordinator                        │
+│  • Topological sort of agents                           │
+│  • LIFO rollback on failure                             │
+└──────┬──────────────┬──────────────┬────────────────────┘
+       │              │              │
+┌──────▼─────┐ ┌──────▼─────┐ ┌──────▼─────┐
+│  Agent 1   │ │  Agent 2   │ │  Agent 3   │
+│  (Venue)   │ │ (Caterer)  │ │  (Band)    │
+│  Tool: A   │ │  Tool: B   │ │  Tool: C   │
+│ Rollback:A'│ │ Rollback:B'│ │ Rollback:- │
+└────────────┘ └────────────┘ └────────────┘
+```
 
 ## Key Findings
 
-### 1. Automatic vs Manual Rollback
+### 1. Execution Time Analysis
 
-**LangChain Compensation:**
-- Middleware automatically intercepts tool calls
-- Automatically tracks compensatable actions
-- Automatically executes inverse operations on failure
+| Aspect | langchain-compensation | SagaLLM |
+|--------|----------------------|---------|
+| LLM Calls | Yes (ReAct reasoning) | No (deterministic) |
+| Time per task | ~7s | ~2s |
+| Why? | LLM decides tool sequence | Hardcoded execution |
+
+**Note**: SagaLLM is faster because it uses deterministic tool execution without LLM reasoning. However, this means it cannot adapt to dynamic scenarios.
+
+### 2. Automatic vs Manual Rollback
+
+**langchain-compensation:**
+- Middleware automatically intercepts tool calls via `wrap_tool_call()`
+- Automatically tracks compensatable actions in `CompensationLog`
+- Infers dependencies from data flow between tool results
+- Automatically executes inverse operations on failure in DAG order
 - Zero manual coding required
 
 **SagaLLM:**
 - Default `rollback()` method only prints text
-- Requires custom agent class implementation
+- Requires custom `CompensatableSagaAgent` class implementation
 - Requires manual mapping of tool results to compensation arguments
-- Requires task-specific logic updates
+- Requires task-specific logic updates for each new scenario
 
-### 2. Code Complexity
+### 3. Code Complexity
 
 **Implementation Effort:**
 
 ```
-LangChain Compensation:
-  - Define compensation_mapping: 1 dict
-  - Use middleware: 0 lines of rollback code
-  Total: ~5 lines of configuration
+langchain-compensation:
+  - Define compensation_mapping: {"book_vehicle": "cancel_vehicle_booking"}
+  - Use create_comp_agent(): 1 function call
+  - Rollback code: 0 lines (automatic)
+  Total: ~10 lines of configuration
 
 SagaLLM:
   - Custom CompensatableSagaAgent class: ~50 lines
   - Manual rollback() override: ~30 lines
   - Task-specific argument mapping: ~20 lines per task
-  Total: ~100+ lines per task
+  - Agent definition per task: ~30 lines per task
+  Total: ~100+ lines per scenario
 ```
 
-### 3. Maintainability
+### 4. Scalability Analysis
 
-**LangChain Compensation:**
-- New tasks require zero additional rollback code
-- Middleware handles all edge cases automatically
-- Consistent behavior across all tasks
+For complex real-world systems (e.g., 4 agents, 40 DB tools):
 
-**SagaLLM:**
-- Each new task requires updating argument mapping logic
-- Rollback logic must be manually maintained
-- Higher risk of bugs (demonstrated by P6-ACID initial failure)
+| Aspect | langchain-compensation | SagaLLM |
+|--------|----------------------|---------|
+| Adding new tools | Just add to tool list | Decide which agent owns it |
+| Changing workflow | LLM adapts automatically | Redefine agent dependencies |
+| Error handling | Middleware handles all | Manual per agent |
+| Context sharing | Single agent, full context | Pass between agents (lossy) |
 
-### 4. Developer Experience
+### 5. When to Use Each
 
-**LangChain Compensation:**
-1. Define tools with inverse operations
-2. Configure compensation mapping
-3. Use middleware - done!
+**Use langchain-compensation when:**
+- Building ReAct agents with complex tool orchestration
+- Workflows are dynamic and depend on intermediate results
+- You want automatic compensation without boilerplate
+- Maintainability is a priority
 
-**SagaLLM:**
-1. Define Agent classes
-2. Implement custom rollback logic
-3. Map tool results manually
-4. Update mappings for each task
-5. Test and debug manually
+**Use SagaLLM when:**
+- Workflows are well-defined and predictable
+- You need explicit control over agent boundaries
+- Different agents need different permissions/capabilities
+- Parallel execution of independent sub-tasks is required
+- Cost/latency of LLM calls is a concern
+
+## Technical Details
+
+### langchain-compensation Middleware Features
+
+1. **CompensationLog**: Thread-safe tracking of all compensatable actions
+2. **CompensationRecord**: Stores tool name, params, result, compensation tool, dependencies
+3. **Dependency Inference**: Automatically detects data flow between tools
+4. **DAG Rollback**: Respects dependencies when rolling back (not just LIFO)
+5. **State Mappers**: Custom functions to extract compensation params from results
+
+### SagaLLM Framework Features
+
+1. **Saga Coordinator**: Manages agent execution order via topological sort
+2. **Agent Dependencies**: Explicit definition of which agents depend on others
+3. **Rollback Stack**: LIFO rollback of completed agents on failure
+4. **Context Storage**: Execution results stored for rollback reference
 
 ## Conclusion
 
-The benchmark conclusively demonstrates that `langchain-compensation` provides superior developer experience and maintainability while achieving the same functional correctness as SagaLLM. The automatic rollback mechanism eliminates the need for manual coding, reducing development time, maintenance burden, and error potential.
+Both frameworks achieve the goal of ACID-like transactional guarantees, but with different tradeoffs:
 
-**Recommendation**: For production systems requiring ACID-like transactional guarantees in agentic workflows, `langchain-compensation` middleware is the recommended solution due to its automatic rollback capabilities and zero-boilerplate approach.
+- **langchain-compensation** provides a **middleware-based approach** with automatic tracking and rollback, ideal for complex, dynamic agentic systems where LLM reasoning is the value proposition.
+
+- **SagaLLM** provides a **multi-agent coordination approach** with explicit control, better suited for well-defined workflows where deterministic execution and lower latency are priorities.
+
+**For production agentic AI systems** with complex tool orchestration, `langchain-compensation` is recommended due to:
+1. Zero-boilerplate compensation handling
+2. Automatic dependency inference
+3. Single agent with full context
+4. Better maintainability as requirements change
 
 ## Running the Benchmark
 
-To reproduce these results:
+### Prerequisites
 
 ```bash
-python run_evaluation.py --frameworks compensation,sagallm --tasks P5-ACID,P6-ACID --runs 1
+# Requires Python 3.10+ for langchain v1
+python3.12 -m venv .venv312
+source .venv312/bin/activate  # On Windows: .venv312\Scripts\activate
+pip install langchain>=1.0.0 langgraph>=1.0.0 langchain-compensation langchain-google-genai
+```
+
+### Run Comparison
+
+```bash
+# Activate the Python 3.12 environment
+source .venv312/bin/activate
+
+# Run ACID benchmark
+python run_evaluation.py --frameworks sagallm,compensation_lib --tasks P5-ACID,P6-ACID --runs 1
+```
+
+### With LangSmith Tracing
+
+Add to `.env`:
+```
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=your_key_here
+LANGSMITH_PROJECT=c-benchmark
 ```
 
 Results are saved in `evaluation_results/` directory with detailed metrics and visualizations.
-

@@ -10,9 +10,10 @@ This guide provides step-by-step instructions for setting up and running the `RE
 
 Before you begin, ensure you have the following installed on your Windows machine:
 
-1.  **Python 3.10 or higher**:
+1.  **Python 3.10 or higher** (Required for langchain-compensation):
     *   Download from [python.org](https://www.python.org/downloads/windows/).
     *   **Important**: During installation, check the box that says **"Add Python to PATH"**.
+    *   **Note**: `langchain-compensation` requires `langchain >= 1.0.0` which requires Python 3.10+.
 2.  **Git**:
     *   Download from [git-scm.com](https://git-scm.com/download/win).
 3.  **Visual Studio Code (Recommended)**:
@@ -44,6 +45,8 @@ A virtual environment allows you to install libraries for this project without a
 python -m venv .venv
 ```
 
+**Note**: If you have multiple Python versions, use `py -3.10 -m venv .venv` or `py -3.12 -m venv .venv` to specify the version.
+
 ### Step 4: Activate the Virtual Environment
 This step tells your terminal to use the Python version and libraries inside the `.venv` folder.
 
@@ -69,6 +72,13 @@ pip install -r requirements.txt
 
 *Note: This may take a few minutes.*
 
+### Step 6: Install langchain-compensation Dependencies
+For the compensation framework comparison, install additional packages:
+
+```cmd
+pip install langchain>=1.0.0 langgraph>=1.0.0 langchain-compensation langchain-google-genai
+```
+
 ---
 
 ## 4. Configuration (API Keys)
@@ -84,7 +94,16 @@ GOOGLE_API_KEY=your_actual_api_key_here
 GEMINI_API_KEY=your_actual_api_key_here
 ```
 
-4.  Save the file.
+4.  (Optional) For LangSmith tracing, add:
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=your_langsmith_key_here
+LANGSMITH_PROJECT=c-benchmark
+```
+
+5.  Save the file.
 
 ---
 
@@ -98,7 +117,7 @@ First, run the test script to ensure everything is set up correctly.
 ```cmd
 python test_compensation_integration.py
 ```
-*Expected Output: You should see several green checkmarks and "✅ All tests passed!".*
+*Expected Output: You should see several green checkmarks and "All tests passed!".*
 
 ### Run Compensation Evaluation
 To run the specific scenarios (CT1, CT2, CT3) designed for the compensation framework:
@@ -114,12 +133,14 @@ To test strict transactional integrity (all-or-nothing execution):
 python run_evaluation.py --frameworks compensation --tasks P5-ACID,P6-ACID
 ```
 
-### Run Comparison with SagaLLM
-To compare the compensation framework against SagaLLM on ACID tests:
+### Run Comparison: langchain-compensation vs SagaLLM
+To compare the langchain-compensation library against SagaLLM on ACID tests:
 
 ```cmd
-python run_evaluation.py --frameworks compensation,sagallm --tasks P5-ACID,P6-ACID
+python run_evaluation.py --frameworks sagallm,compensation_lib --tasks P5-ACID,P6-ACID --runs 1
 ```
+
+**Note**: `compensation_lib` uses `langchain-compensation` library directly with `create_comp_agent()`.
 
 ### Run Comparison (Advanced)
 To compare the compensation framework against standard LangGraph on disruption scenarios:
@@ -130,7 +151,18 @@ python run_evaluation.py --frameworks compensation,langgraph --tasks P4,P7,P8,P9
 
 ---
 
-## 6. Troubleshooting Common Windows Issues
+## 6. Framework Differences
+
+| Framework | Description |
+|-----------|-------------|
+| `compensation` | Custom compensation middleware (embedded) |
+| `compensation_lib` | Uses `langchain-compensation` library with `create_comp_agent()` |
+| `sagallm` | SagaLLM multi-agent Saga pattern |
+| `langgraph` | Standard LangGraph agent |
+
+---
+
+## 7. Troubleshooting Common Windows Issues
 
 ### Issue: "python is not recognized as an internal or external command"
 *   **Cause**: Python was not added to your system PATH during installation.
@@ -151,11 +183,39 @@ python run_evaluation.py --frameworks compensation,langgraph --tasks P4,P7,P8,P9
 *   **Cause**: Python trying to write cache files to a protected directory.
 *   **Fix**: This is usually a warning and can be ignored. The script will use a temporary folder automatically.
 
+### Issue: "No module named 'langchain.agents'" or similar
+*   **Cause**: You're using an older version of langchain.
+*   **Fix**: Ensure you have langchain >= 1.0.0:
+    ```cmd
+    pip install langchain>=1.0.0 --upgrade
+    ```
+
+### Issue: Python version too old for langchain v1
+*   **Cause**: langchain >= 1.0.0 requires Python 3.10+
+*   **Fix**: Install Python 3.10 or higher and create a new virtual environment.
+
 ---
 
-## 7. Viewing Results
+## 8. Viewing Results
 
 After running the evaluation, results are saved in the `evaluation_results` folder.
 *   **JSON/CSV Files**: Open these in Excel or VS Code to see the data.
 *   **PNG Images**: These are charts visualizing the performance. You can open them with the standard Windows Photos app.
 
+---
+
+## 9. Quick Reference
+
+```cmd
+# Activate environment
+.venv\Scripts\activate
+
+# Run ACID benchmark
+python run_evaluation.py --frameworks sagallm,compensation_lib --tasks P5-ACID,P6-ACID --runs 1
+
+# Run with multiple runs for averaging
+python run_evaluation.py --frameworks sagallm,compensation_lib --tasks P5-ACID,P6-ACID --runs 3
+
+# Deactivate when done
+deactivate
+```

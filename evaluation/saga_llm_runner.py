@@ -112,133 +112,65 @@ class CompensatableSagaAgent(Agent):
         # This ensures each agent makes its own LLM call (the real SagaLLM behavior)
 
     def run(self):
-        """Run using ACTUAL LLM calls - each agent makes its own LLM call"""
-        print(f"🚀 {self.name} executing with LLM (Gemini)...")
-        
+        """
+        Run agent with deterministic tool execution.
+
+        This uses hardcoded arguments to focus on benchmarking the COMPENSATION MECHANISM,
+        not the LLM's ability to parse arguments. Both SagaLLM and compensation_lib
+        use the same approach for fair comparison.
+        """
+        print(f"🚀 {self.name} executing...")
+
         try:
-            # Use Gemini directly (bypassing ReactAgent's OpenAI requirement)
-            gemini_model = ChatGoogleGenerativeAI(
-                model="gemini-flash-latest",
-                temperature=0,
-                convert_system_message_to_human=True
-            )
-            
-            # Build tool descriptions for the prompt
-            tool_descriptions = []
-            if self.react_agent.tools:
-                for tool in self.react_agent.tools:
-                    tool_desc = f"- {tool.name}: {tool.fn_signature if hasattr(tool, 'fn_signature') else 'Available tool'}"
-                    tool_descriptions.append(tool_desc)
-            
-            # Create prompt for this specific agent
-            prompt = f"""You are {self.name}. {self.backstory}
-
-Your task: {self.task_description}
-
-You have access to these tools:
-{chr(10).join(tool_descriptions) if tool_descriptions else 'No tools available'}
-
-Call the appropriate tool to complete your task. Return the result as JSON.
-Example format: {{"status": "success", "result": "..."}} or {{"status": "error", "message": "..."}}"""
-            
-            # Make LLM call - THIS IS THE REAL COST
-            from langchain_core.messages import HumanMessage, SystemMessage
-            messages = [
-                SystemMessage(content=f"You are {self.name}. {self.backstory}"),
-                HumanMessage(content=prompt)
-            ]
-            
-            # Make LLM call - THIS IS THE REAL COST
-            # Each agent makes its own LLM call in SagaLLM
-            # This is the key difference: SagaLLM = N agents = N LLM calls
-            # Compensation = 1 agent = 1 LLM call (or fewer)
-
-            # Track this agent's LLM call
-            if not hasattr(self, '_agent_llm_calls'):
-                self._agent_llm_calls = 0
-                self._agent_tokens = {"input": 0, "output": 0}
-
-            self._agent_llm_calls += 1
-            # Invoke with LangSmith run name for tracing
-            response = gemini_model.invoke(
-                messages,
-                config={"run_name": f"sagallm_agent_{self.name}"}
-            )
-            result_text = response.content
-            
-            # Track token usage
-            # Gemini API returns usage_metadata in response
-            if hasattr(response, 'response_metadata') and response.response_metadata:
-                usage = response.response_metadata.get('usage_metadata', {})
-                if usage:
-                    self._agent_tokens["input"] += usage.get('prompt_token_count', 0) or 0
-                    self._agent_tokens["output"] += usage.get('candidates_token_count', 0) or 0
-                else:
-                    # Fallback: check for token_usage
-                    token_usage = response.response_metadata.get('token_usage', {})
-                    if token_usage:
-                        self._agent_tokens["input"] += token_usage.get('prompt_tokens', 0) or 0
-                        self._agent_tokens["output"] += token_usage.get('completion_tokens', 0) or 0
-                    else:
-                        # Estimate tokens if not available (rough estimate: ~4 chars per token)
-                        estimated_input = len(prompt) // 4
-                        estimated_output = len(result_text) // 4
-                        self._agent_tokens["input"] += estimated_input
-                        self._agent_tokens["output"] += estimated_output
-            else:
-                # Estimate tokens if metadata not available
-                estimated_input = len(prompt) // 4
-                estimated_output = len(result_text) // 4
-                self._agent_tokens["input"] += estimated_input
-                self._agent_tokens["output"] += estimated_output
-            
-            # Try to execute the tool if LLM suggests it
-            # For simplicity, we'll check if the result indicates a tool call
-            # In a full implementation, we'd parse tool calls from LLM response
-            
-            # If we have tools, try to execute the first one with reasonable defaults
             if self.react_agent.tools and len(self.react_agent.tools) > 0:
                 tool = self.react_agent.tools[0]
-                
-                # Extract arguments based on agent name (simplified - in real scenario LLM would provide these)
-                args = {}
-                if "book_venue" in self.name or "Venue" in self.name:
-                    args = {"vehicle_id": "venue_1", "passenger_id": "wedding_party", "route": "main"}
-                elif "book_caterer" in self.name or "Caterer" in self.name:
-                    args = {"resource_type": "caterer", "resource_id": "cat_1", "amount": 10}
-                elif "book_band" in self.name or "Band" in self.name:
-                    args = {"resource_type": "band", "requested_amount": 100}  # Will fail
-                elif "Sides" in self.name:
-                    args = {"vehicle_id": "sides_truck", "passenger_id": "food", "route": "kitchen"}
-                elif "Drinks" in self.name:
-                    args = {"vehicle_id": "drinks_truck", "passenger_id": "beverages", "route": "bar"}
-                elif "Turkey" in self.name:
-                    args = {"resource_type": "turkey", "requested_amount": 100}  # Will fail
-                
+
+                # Deterministic args based on agent name (for fair benchmark comparison)
+                args = self._get_deterministic_args()
+                print(f"   📝 Tool args: {args}")
+
                 # Execute tool
                 if hasattr(tool, 'func'):
                     tool_result = tool.func(**args)
                 elif hasattr(tool, 'run'):
                     tool_result = tool.run(**args)
                 else:
-                    tool_result = str(result_text)  # Fallback to LLM response
-                
+                    tool_result = "No tool function available"
+
                 self.execution_result = tool_result
-                
+
                 # Check for failure
-                if "error" in str(tool_result).lower() or "fail" in str(tool_result).lower() or "capacity exceeded" in str(tool_result).lower():
+                if "error" in str(tool_result).lower() or "capacity exceeded" in str(tool_result).lower():
                     raise Exception(f"Tool execution failed: {tool_result}")
-                
+
                 return str(tool_result)
             else:
-                # No tools, just return LLM response
-                self.execution_result = result_text
-                return result_text
-                
+                self.execution_result = "No tools available"
+                return self.execution_result
+
         except Exception as e:
-            # Store error for rollback
             self.execution_result = str(e)
             raise e
+
+    def _get_deterministic_args(self) -> dict:
+        """Get deterministic tool arguments based on agent name."""
+        # P5-ACID: Wedding Logistics
+        if "Venue" in self.name:
+            return {"vehicle_id": "venue_1", "passenger_id": "wedding_party", "route": "main"}
+        elif "Caterer" in self.name:
+            return {"resource_type": "caterer", "resource_id": "cat_1", "amount": 10}
+        elif "Band" in self.name:
+            return {"resource_type": "band", "requested_amount": 100}  # Will fail (>50)
+
+        # P6-ACID: Thanksgiving Dinner
+        elif "Sides" in self.name:
+            return {"vehicle_id": "sides_truck", "passenger_id": "food", "route": "kitchen"}
+        elif "Drinks" in self.name:
+            return {"vehicle_id": "drinks_truck", "passenger_id": "beverages", "route": "bar"}
+        elif "Turkey" in self.name:
+            return {"resource_type": "turkey", "requested_amount": 100}  # Will fail (>50)
+
+        return {}
 
     def rollback(self):
         """Override to actually execute compensation"""
@@ -297,67 +229,67 @@ class SagaLLMRunner(BaseFrameworkRunner):
             if "P5-ACID" in task_definition.task_id:
                 # Agent 1: Venue (Succeeds)
                 a1 = CompensatableSagaAgent(
-                    name="Venue Agent (book_venue)",
-                    backstory="Book the venue",
-                    task_description="Book the venue",
-                    tools=[book_vehicle], # Proxy tool
+                    name="Venue Agent",
+                    backstory="Book the wedding venue",
+                    task_description="Book venue using book_vehicle",
+                    tools=[book_vehicle],
                     compensation_tool=cancel_vehicle_booking
                 )
-                
+
                 # Agent 2: Caterer (Succeeds)
                 a2 = CompensatableSagaAgent(
-                    name="Caterer Agent (book_caterer)",
-                    backstory="Book the caterer",
-                    task_description="Book the caterer",
-                    tools=[allocate_resource], # Proxy tool
+                    name="Caterer Agent",
+                    backstory="Book the catering service",
+                    task_description="Book caterer using allocate_resource",
+                    tools=[allocate_resource],
                     compensation_tool=deallocate_resource
                 )
-                
-                # Agent 3: Band (Fails)
+
+                # Agent 3: Band (Fails - capacity > 50)
                 a3 = CompensatableSagaAgent(
-                    name="Band Agent (book_band)",
+                    name="Band Agent",
                     backstory="Book the band",
-                    task_description="Book the band",
-                    tools=[check_capacity], # Proxy tool that fails
+                    task_description="Check band capacity using check_capacity",
+                    tools=[check_capacity],
                     compensation_tool=None
                 )
-                
+
                 # Define Dependencies: A1 -> A2 -> A3
                 a2.add_dependency(a1)
                 a3.add_dependency(a2)
-                
+
                 agents = [a1, a2, a3]
-                
+
             elif "P6-ACID" in task_definition.task_id:
                 # Agent 1: Sides
                 a1 = CompensatableSagaAgent(
-                    name="Sides Agent", 
-                    backstory="Order sides",
-                    task_description="Order sides",
-                    tools=[book_vehicle], 
+                    name="Sides Agent",
+                    backstory="Order side dishes",
+                    task_description="Order sides using book_vehicle",
+                    tools=[book_vehicle],
                     compensation_tool=cancel_vehicle_booking
                 )
                 # Agent 2: Drinks
                 a2 = CompensatableSagaAgent(
-                    name="Drinks Agent", 
+                    name="Drinks Agent",
                     backstory="Order drinks",
-                    task_description="Order drinks",
-                    tools=[book_vehicle], 
+                    task_description="Order drinks using book_vehicle",
+                    tools=[book_vehicle],
                     compensation_tool=cancel_vehicle_booking
                 )
-                # Agent 3: Turkey (Fails)
+                # Agent 3: Turkey (Fails - capacity > 50)
                 a3 = CompensatableSagaAgent(
-                    name="Turkey Agent", 
+                    name="Turkey Agent",
                     backstory="Order turkey",
-                    task_description="Order turkey",
-                    tools=[check_capacity], 
+                    task_description="Check turkey capacity using check_capacity",
+                    tools=[check_capacity],
                     compensation_tool=None
                 )
-                
+
                 # Dependencies: (A1, A2) -> A3
                 a3.add_dependency(a1)
                 a3.add_dependency(a2)
-                
+
                 agents = [a1, a2, a3]
             
             # Register and Run

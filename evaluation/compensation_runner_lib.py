@@ -1,21 +1,22 @@
 """
-Compensation Framework Runner using langchain-compensation (direct usage)
+Compensation Framework Runner using langchain-compensation library.
 
-This runner demonstrates how to use the langchain-compensation library as intended,
-without embedding or adapting its logic. It is designed for comparison with the custom
-integration in compensation_runner.py.
+This runner uses the langchain-compensation library which provides:
+- create_comp_agent: Creates a LangChain agent with automatic compensation middleware
+- CompensationMiddleware: Wraps tool calls and handles automatic LIFO/DAG rollback
+- CompensationLog: Thread-safe tracking of actions and dependencies
 
-Requires: langchain>=1.0.0, langgraph>=1.0.0, langchain-compensation>=0.3.0
+This is benchmarked against SagaLLM which uses a multi-agent Saga pattern.
 """
 
 import os
 import sys
 import time
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 from dotenv import load_dotenv
 
-# Load environment variables FIRST (before any langchain imports)
+# Load environment variables FIRST
 load_dotenv()
 
 # Add project paths
@@ -24,146 +25,94 @@ sys.path.append(project_root)
 
 # Configure LangSmith tracing
 os.environ.setdefault("LANGSMITH_TRACING", "true")
-os.environ.setdefault("LANGSMITH_PROJECT", "compensating-react-agent")
+os.environ.setdefault("LANGSMITH_PROJECT", "c-benchmark")
 
-from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_compensation import create_comp_agent
 from .task_definitions import TaskDefinition
 from .framework_runners import BaseFrameworkRunner
 
+# Import the SAME tools used by SagaLLM
+from .compensation_runner import (
+    book_vehicle, cancel_vehicle_booking,
+    allocate_resource, deallocate_resource,
+    check_capacity
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Tools for multi-agent planning scenarios
-# ============================================================================
-
-@tool
-def book_vehicle(vehicle_id: str, passenger_id: str, route: str) -> Dict[str, Any]:
-    """Books a vehicle for a passenger on a specific route. Returns booking details."""
-    booking_id = f"booking_{vehicle_id}_{passenger_id}_{int(time.time())}"
-    return {
-        "status": "success",
-        "booking_id": booking_id,
-        "vehicle_id": vehicle_id,
-        "passenger_id": passenger_id,
-        "route": route
-    }
-
-@tool
-def cancel_vehicle_booking(booking_id: str) -> Dict[str, Any]:
-    """Cancels a vehicle booking. Returns cancellation status."""
-    return {
-        "status": "success",
-        "message": f"Booking {booking_id} cancelled successfully"
-    }
-
-@tool
-def book_flight(destination: str, passenger_name: str) -> Dict[str, Any]:
-    """Books a flight to a destination. Returns flight booking details."""
-    flight_id = f"flight_{destination}_{int(time.time())}"
-    return {
-        "status": "success",
-        "flight_id": flight_id,
-        "destination": destination,
-        "passenger": passenger_name
-    }
-
-@tool
-def cancel_flight(flight_id: str) -> Dict[str, Any]:
-    """Cancels a flight booking."""
-    return {
-        "status": "success",
-        "message": f"Flight {flight_id} cancelled successfully"
-    }
-
-@tool
-def book_hotel(hotel_name: str, guest_name: str, nights: int) -> Dict[str, Any]:
-    """Books a hotel room. Returns hotel booking details."""
-    reservation_id = f"hotel_{hotel_name}_{int(time.time())}"
-    return {
-        "status": "success",
-        "reservation_id": reservation_id,
-        "hotel": hotel_name,
-        "guest": guest_name,
-        "nights": nights
-    }
-
-@tool
-def cancel_hotel(reservation_id: str) -> Dict[str, Any]:
-    """Cancels a hotel reservation."""
-    return {
-        "status": "success",
-        "message": f"Reservation {reservation_id} cancelled successfully"
-    }
-
-# Compensation mapping: maps action tools to their compensation (rollback) tools
+# Compensation mapping: tool -> compensation tool
 COMPENSATION_MAPPING = {
     "book_vehicle": "cancel_vehicle_booking",
-    "book_flight": "cancel_flight",
-    "book_hotel": "cancel_hotel",
+    "allocate_resource": "deallocate_resource",
 }
 
-# All tools available to the agent
+# All tools for the agent
 ALL_TOOLS = [
     book_vehicle, cancel_vehicle_booking,
-    book_flight, cancel_flight,
-    book_hotel, cancel_hotel,
+    allocate_resource, deallocate_resource,
+    check_capacity,
 ]
 
 
 class CompensationLibRunner(BaseFrameworkRunner):
     """
-    Framework runner that uses langchain-compensation library directly.
+    Framework runner using langchain-compensation's create_comp_agent.
 
-    This runner uses the official langchain-compensation create_comp_agent function
-    which provides automatic Saga-pattern rollback when tool calls fail.
+    Key difference from SagaLLM:
+    - Single agent with compensation middleware
+    - LLM decides which tools to call
+    - Middleware automatically tracks and rolls back on failure
     """
 
-    def __init__(self, tools: List[Any] = None, compensation_mapping: Dict[str, str] = None):
+    def __init__(self):
         super().__init__()
-        self.tools = tools or ALL_TOOLS
-        self.compensation_mapping = compensation_mapping or COMPENSATION_MAPPING
 
-        # Initialize the LLM
+        # Initialize LLM (same as SagaLLM uses)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-flash-latest",
-            temperature=0.1
+            temperature=0
         )
 
-        # Create the compensation-enabled agent using the library
+        # Create agent with compensation middleware using the library
         self.agent = create_comp_agent(
             model=self.llm,
-            tools=self.tools,
-            compensation_mapping=self.compensation_mapping,
-            system_prompt="""You are a helpful multi-agent planning assistant.
+            tools=ALL_TOOLS,
+            compensation_mapping=COMPENSATION_MAPPING,
+            system_prompt="""You are a task execution agent with automatic rollback capabilities.
 
-When given a planning task:
-1. Break down the task into steps
-2. Use the available tools to execute bookings and reservations
-3. If a booking fails, the system will automatically rollback previous successful bookings
+Execute the tasks step by step using the available tools:
+- book_vehicle(vehicle_id, passenger_id, route): Book a vehicle/venue
+- allocate_resource(resource_type, resource_id, amount): Allocate a resource
+- check_capacity(resource_type, requested_amount): Check if capacity is available (fails if amount > 50)
 
-Use tools to complete the user's request."""
+If any step fails, the system automatically rolls back previous operations.
+Execute tasks in the exact order specified. Do not skip steps."""
         )
 
         logger.info("CompensationLibRunner initialized with langchain-compensation library")
+
+    def __call__(self, task_definition: TaskDefinition) -> Dict[str, Any]:
+        return self.call(task_definition)
 
     def call(self, task_definition: TaskDefinition) -> Dict[str, Any]:
         """Execute a task using the compensation-enabled agent."""
         start_time = time.time()
         self._record_memory_usage()
 
-        # Build the task message
-        user_message = self._build_task_message(task_definition)
-        logger.info(f"Invoking compensation agent with task: {task_definition.task_id}")
+        task_id = task_definition.task_id
+        user_message = self._build_task_message(task_id)
+
+        logger.info(f"Invoking compensation agent with task: {task_id}")
 
         try:
-            # Invoke the agent with LangSmith run name for tracing
+            # Invoke the agent - it will use LLM to decide tool calls
+            # CompensationMiddleware will track and rollback on failure
             result = self.agent.invoke(
                 {"messages": [HumanMessage(content=user_message)]},
-                config={"run_name": f"compensation_lib_{task_definition.task_id}"}
+                config={"run_name": f"compensation_lib_{task_id}"}
             )
 
             execution_time = time.time() - start_time
@@ -172,34 +121,63 @@ Use tools to complete the user's request."""
 
             logger.info(f"Agent completed in {execution_time:.2f}s")
 
-            # Extract and return results
-            return self._process_result(result, task_definition)
+            # Extract results
+            return self._process_result(result)
 
         except Exception as e:
-            logger.error(f"Agent execution error: {str(e)}")
+            logger.error(f"Agent execution error: {e}")
             import traceback
             traceback.print_exc()
             return self._create_execution_result([], [], [])
 
-    def _build_task_message(self, task_definition: TaskDefinition) -> str:
-        """Build a comprehensive task message from the task definition."""
-        parts = [f"Task: {task_definition.description}"]
+    def _build_task_message(self, task_id: str) -> str:
+        """Build task-specific message matching SagaLLM's tasks."""
 
-        if hasattr(task_definition, 'goals') and task_definition.goals:
-            goals = [g.description for g in task_definition.goals]
-            parts.append(f"Goals: {goals}")
+        if task_id == "P5-ACID":
+            return """Execute this wedding planning task with exactly 3 steps in order:
 
-        if hasattr(task_definition, 'constraints') and task_definition.constraints:
-            constraints = [c.description for c in task_definition.constraints]
-            parts.append(f"Constraints: {constraints}")
+Step 1: Book venue using book_vehicle with:
+- vehicle_id: "venue_1"
+- passenger_id: "wedding_party"
+- route: "main"
 
-        if hasattr(task_definition, 'resources') and task_definition.resources:
-            parts.append(f"Resources: {task_definition.resources}")
+Step 2: Book caterer using allocate_resource with:
+- resource_type: "caterer"
+- resource_id: "cat_1"
+- amount: 10
 
-        return "\n".join(parts)
+Step 3: Check band capacity using check_capacity with:
+- resource_type: "band"
+- requested_amount: 100
 
-    def _process_result(self, result: Dict[str, Any], task_definition: TaskDefinition) -> Dict[str, Any]:
-        """Process the agent result and extract metrics."""
+Note: Step 3 will fail because requested_amount > 50.
+The system should automatically rollback steps 1 and 2."""
+
+        elif task_id == "P6-ACID":
+            return """Execute this Thanksgiving dinner ordering task with exactly 3 steps in order:
+
+Step 1: Order sides using book_vehicle with:
+- vehicle_id: "sides_truck"
+- passenger_id: "food"
+- route: "kitchen"
+
+Step 2: Order drinks using book_vehicle with:
+- vehicle_id: "drinks_truck"
+- passenger_id: "beverages"
+- route: "bar"
+
+Step 3: Check turkey capacity using check_capacity with:
+- resource_type: "turkey"
+- requested_amount: 100
+
+Note: Step 3 will fail because requested_amount > 50.
+The system should automatically rollback steps 1 and 2."""
+
+        else:
+            return f"Execute task: {task_id}"
+
+    def _process_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Process the agent result."""
         achieved_goals = []
         satisfied_constraints = []
         schedule = []
@@ -207,41 +185,17 @@ Use tools to complete the user's request."""
         # Extract messages from result
         messages = result.get("messages", [])
 
-        # Analyze tool calls and responses
-        tool_results = []
         for msg in messages:
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
                 for tc in msg.tool_calls:
-                    tool_results.append({
+                    schedule.append({
                         "tool": tc.get("name"),
-                        "args": tc.get("args", {})
+                        "args": tc.get("args", {}),
+                        "timestamp": time.time()
                     })
-            if hasattr(msg, 'content') and hasattr(msg, 'name'):
-                # This is a tool response
-                schedule.append({
-                    "tool": getattr(msg, 'name', 'unknown'),
-                    "result": msg.content,
-                    "timestamp": time.time()
-                })
-
-        # Simple goal matching based on task completion
-        if task_definition.goals:
-            for goal in task_definition.goals:
-                # Mark goal as achieved if we have tool results
-                if tool_results:
-                    achieved_goals.append(goal.goal_id)
-
-        # Simple constraint matching
-        if task_definition.constraints:
-            for constraint in task_definition.constraints:
-                satisfied_constraints.append(constraint.constraint_id)
 
         return self._create_execution_result(
             achieved_goals=achieved_goals,
             satisfied_constraints=satisfied_constraints,
             schedule=schedule
         )
-
-    def __call__(self, task_definition: TaskDefinition) -> Dict[str, Any]:
-        """Make the runner callable."""
-        return self.call(task_definition)
