@@ -60,13 +60,13 @@ Examples:
     parser.add_argument(
         '--frameworks',
         type=str,
-        help='Comma-separated list of frameworks to evaluate (langgraph,autogen,crewai,swarm)'
+        help='Comma-separated list of frameworks to evaluate (langgraph,autogen,crewai,swarm,compensation)'
     )
     
     parser.add_argument(
         '--tasks',
         type=str,
-        help='Comma-separated list of tasks to evaluate (P0-P10)'
+        help='Comma-separated list of tasks to evaluate (P0-P11,CT1-CT3 for compensation tasks)'
     )
     
     parser.add_argument(
@@ -164,7 +164,7 @@ def main():
     # Get available frameworks
     if args.mock:
         print("Using mock runners for testing...")
-        available_frameworks = ["langgraph", "autogen", "crewai", "swarm"]
+        available_frameworks = ["langgraph", "autogen", "crewai", "swarm", "compensation"]
         framework_runners = {
             framework: create_mock_runner(framework)
             for framework in available_frameworks

@@ -1,5 +1,7 @@
 db/traces.db
 /venv
+.venv/
 __pycache__
 .env
 .cache
+evaluation_results/

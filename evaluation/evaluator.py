@@ -22,6 +22,11 @@ from .metrics import (
     ResourceUsageMetrics,
     AdaptationMetrics
 )
+try:
+    from .compensation_metrics import CompensationMetrics
+    COMPENSATION_METRICS_AVAILABLE = True
+except ImportError:
+    COMPENSATION_METRICS_AVAILABLE = False
 from .task_definitions import TaskDefinition, TaskResult, TASK_DEFINITIONS
 
 
@@ -52,6 +57,12 @@ class TaskEvaluator:
         self.constraint_satisfaction = ConstraintSatisfactionMetrics()
         self.resource_usage = ResourceUsageMetrics()
         self.adaptation = AdaptationMetrics()
+        
+        # Initialize compensation metrics if available
+        if COMPENSATION_METRICS_AVAILABLE:
+            self.compensation_metrics = CompensationMetrics()
+        else:
+            self.compensation_metrics = None
     
     def evaluate_framework(self, framework: str, framework_runner: Callable) -> TaskResult:
         """Evaluate a single framework on this task"""
@@ -62,7 +73,7 @@ class TaskEvaluator:
             execution_result = framework_runner(self.task_definition)
             
             # Calculate metrics
-            metrics = self._calculate_metrics(execution_result)
+            metrics = self._calculate_metrics(execution_result, framework)
             
             execution_time = time.time() - start_time
             
@@ -94,7 +105,7 @@ class TaskEvaluator:
                 metrics={}
             )
     
-    def _calculate_metrics(self, execution_result: Dict[str, Any]) -> Dict[str, float]:
+    def _calculate_metrics(self, execution_result: Dict[str, Any], framework: str = None) -> Dict[str, float]:
         """Calculate all metrics for the execution result"""
         metrics = {}
         
@@ -156,6 +167,28 @@ class TaskEvaluator:
                 disruptions, replanning_attempts
             )
             metrics['replanning_success_rate'] = adaptation_result.value
+        
+        # Compensation Metrics (if framework is compensation and metrics available)
+        if framework == 'compensation' and self.compensation_metrics and 'compensation_metrics' in resource_usage:
+            comp_metrics_data = resource_usage['compensation_metrics']
+            
+            # Rollback success rate
+            rollback_result = self.compensation_metrics.evaluate_rollback_success_rate(comp_metrics_data)
+            metrics['rollback_success_rate'] = rollback_result.value
+            
+            # Compensation coverage
+            coverage_result = self.compensation_metrics.evaluate_compensation_coverage(comp_metrics_data)
+            metrics['compensation_coverage'] = coverage_result.value
+            
+            # Rollback time
+            exec_times = resource_usage.get('execution_times', [])
+            rollback_time_result = self.compensation_metrics.evaluate_rollback_time(exec_times, comp_metrics_data)
+            metrics['average_rollback_time'] = rollback_time_result.value
+            
+            # Compensation efficiency
+            total_time = sum(exec_times) if exec_times else 0
+            efficiency_result = self.compensation_metrics.evaluate_compensation_efficiency(comp_metrics_data, total_time)
+            metrics['compensation_efficiency'] = efficiency_result.value
         
         return metrics
 

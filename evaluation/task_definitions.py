@@ -459,4 +459,12 @@ TASK_DEFINITIONS = {
             "adaptation": 0.1
         }
     )
-} 
+}
+
+# Import and merge compensation tasks
+try:
+    from .compensation_tasks import COMPENSATION_TASK_DEFINITIONS
+    TASK_DEFINITIONS.update(COMPENSATION_TASK_DEFINITIONS)
+except ImportError:
+    # Compensation tasks not available
+    pass 

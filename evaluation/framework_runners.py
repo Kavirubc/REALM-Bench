@@ -437,6 +437,13 @@ def get_framework_runners() -> Dict[str, BaseFrameworkRunner]:
     except Exception as e:
         print(f"Swarm runner not available: {e}")
     
+    # Add compensation runner
+    try:
+        from .compensation_runner import CompensationLangGraphRunner
+        runners['compensation'] = CompensationLangGraphRunner()
+    except Exception as e:
+        print(f"Compensation runner not available: {e}")
+    
     return runners
 
 
