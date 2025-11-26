@@ -107,6 +107,20 @@ To run the specific scenarios (CT1, CT2, CT3) designed for the compensation fram
 python run_evaluation.py --frameworks compensation --tasks CT1,CT2,CT3
 ```
 
+### Run ACID Transactional Tests
+To test strict transactional integrity (all-or-nothing execution):
+
+```cmd
+python run_evaluation.py --frameworks compensation --tasks P5-ACID,P6-ACID
+```
+
+### Run Comparison with SagaLLM
+To compare the compensation framework against SagaLLM on ACID tests:
+
+```cmd
+python run_evaluation.py --frameworks compensation,sagallm --tasks P5-ACID,P6-ACID
+```
+
 ### Run Comparison (Advanced)
 To compare the compensation framework against standard LangGraph on disruption scenarios:
 

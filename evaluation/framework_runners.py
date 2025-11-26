@@ -443,6 +443,13 @@ def get_framework_runners() -> Dict[str, BaseFrameworkRunner]:
         runners['compensation'] = CompensationLangGraphRunner()
     except Exception as e:
         print(f"Compensation runner not available: {e}")
+
+    # Add SagaLLM runner
+    try:
+        from .saga_llm_runner import SagaLLMRunner
+        runners['sagallm'] = SagaLLMRunner()
+    except Exception as e:
+        print(f"SagaLLM runner not available: {e}")
     
     return runners
 

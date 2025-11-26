@@ -171,6 +171,82 @@ COMPENSATION_TASK_DEFINITIONS = {
             "coordination_effectiveness": 0.3,
             "compensation_effectiveness": 0.5
         }
+    ),
+
+    "P5-ACID": TaskDefinition(
+        task_id="P5-ACID",
+        name="Wedding Logistics (ACID Transaction)",
+        category=TaskCategory.LOGISTICS,
+        description=(
+            "Atomic Transaction: Book all wedding resources (Venue, Caterer, Band). "
+            "The Band is unavailable. The system MUST cleanly rollback Venue and Caterer bookings "
+            "to ensure state consistency. Partial success is considered a failure."
+        ),
+        goals=[
+            TaskGoal("book_venue", "Book Wedding Venue", 0.3),
+            TaskGoal("book_caterer", "Book Catering Service", 0.3),
+            TaskGoal("book_band", "Book Live Band (Will Fail)", 0.4)
+        ],
+        constraints=[
+            TaskConstraint(
+                "atomic_transaction",
+                "dependency",
+                "All bookings must succeed or none should exist",
+                {"dependencies": [
+                    ["book_venue", "book_caterer"],
+                    ["book_caterer", "book_band"]
+                ]}
+            )
+        ],
+        resources={
+            "venue": {"id": "grand_hall", "capacity": 200},
+            "caterer": {"id": "gourmet_delight", "menu": "standard"},
+            "band": {"id": "the_rockers", "available": False} # Will cause failure
+        },
+        disruption_scenarios=[
+            {"type": "resource_unavailable", "trigger": "book_band", "resource": "band"}
+        ],
+        evaluation_weights={
+            "state_consistency": 1.0  # Only consistency matters for ACID test
+        }
+    ),
+
+    "P6-ACID": TaskDefinition(
+        task_id="P6-ACID",
+        name="Thanksgiving Dinner (ACID Transaction)",
+        category=TaskCategory.LOGISTICS,
+        description=(
+            "Atomic Transaction: Order Turkey, Sides, and Drinks. "
+            "Turkey is out of stock. The system MUST cancel Sides and Drinks orders. "
+            "No partial orders allowed."
+        ),
+        goals=[
+            TaskGoal("order_sides", "Order Side Dishes", 0.3),
+            TaskGoal("order_drinks", "Order Drinks", 0.3),
+            TaskGoal("order_turkey", "Order Turkey (Will Fail)", 0.4)
+        ],
+        constraints=[
+            TaskConstraint(
+                "atomic_transaction",
+                "dependency",
+                "Main dish (Turkey) is required for any order",
+                {"dependencies": [
+                    ["order_sides", "order_turkey"], 
+                    ["order_drinks", "order_turkey"]
+                ]}
+            )
+        ],
+        resources={
+            "sides": ["mashed_potatoes", "stuffing"],
+            "drinks": ["cider", "wine"],
+            "turkey": {"available": False} # Will cause failure
+        },
+        disruption_scenarios=[
+            {"type": "out_of_stock", "trigger": "order_turkey", "resource": "turkey"}
+        ],
+        evaluation_weights={
+            "state_consistency": 1.0
+        }
     )
 }
 
@@ -181,4 +257,3 @@ def get_all_task_definitions() -> Dict[str, TaskDefinition]:
     from .task_definitions import TASK_DEFINITIONS
     all_tasks = {**TASK_DEFINITIONS, **COMPENSATION_TASK_DEFINITIONS}
     return all_tasks
-
