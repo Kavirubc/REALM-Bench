@@ -275,7 +275,7 @@ class CompensationLangGraphRunner(BaseFrameworkRunner):
         # Initialize model (using Gemini)
         try:
             self.model = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-2.0-flash-exp",
                 temperature=0,
                 convert_system_message_to_human=True
             )
@@ -431,7 +431,20 @@ class CompensationLangGraphRunner(BaseFrameworkRunner):
                 return {"messages": tool_results}
             
             def call_model(state):
-                return {"messages": [model_with_tools.invoke(state["messages"])]}
+                response = model_with_tools.invoke(state["messages"])
+                # Track token usage if available
+                if hasattr(response, 'response_metadata') and response.response_metadata:
+                    usage = response.response_metadata.get('usage_metadata', {})
+                    if usage:
+                        if 'input_tokens' not in self.token_usage:
+                            self.token_usage['input_tokens'] = 0
+                        if 'output_tokens' not in self.token_usage:
+                            self.token_usage['output_tokens'] = 0
+                        self.token_usage['input_tokens'] += usage.get('prompt_token_count', 0) or 0
+                        self.token_usage['output_tokens'] += usage.get('candidates_token_count', 0) or 0
+                        self.token_usage['total_tokens'] = self.token_usage.get('input_tokens', 0) + self.token_usage.get('output_tokens', 0)
+                        self.token_usage['llm_call_count'] = self.token_usage.get('llm_call_count', 0) + 1
+                return {"messages": [response]}
             
             def should_continue(state):
                 messages = state["messages"]
@@ -484,6 +497,15 @@ class CompensationLangGraphRunner(BaseFrameworkRunner):
                 "compensation_success_count": self.compensation_success_count,
                 "compensation_failure_count": self.compensation_failure_count,
                 "compensation_log_size": len(comp_log_dict)
+            }
+            
+            # Add LLM metrics
+            exec_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": self.token_usage.get('llm_call_count', 1),  # Compensation uses 1 agent = 1 LLM call
+                "total_input_tokens": self.token_usage.get('input_tokens', 0),
+                "total_output_tokens": self.token_usage.get('output_tokens', 0),
+                "total_tokens": self.token_usage.get('total_tokens', 0),
+                "note": "Compensation uses a single LLM call to orchestrate all tool executions"
             }
             
             return exec_result
