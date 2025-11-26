@@ -12,10 +12,18 @@ import sys
 import json
 import logging
 from typing import Dict, List, Any, Optional
+from dotenv import load_dotenv
+
+# Load environment variables FIRST (before any langchain imports)
+load_dotenv()
 
 # Add project paths
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
+
+# Configure LangSmith tracing
+os.environ.setdefault("LANGSMITH_TRACING", "true")
+os.environ.setdefault("LANGSMITH_PROJECT", "compensating-react-agent")
 # Add SagaLLM lib path - IMPORTANT: This must be added before importing any Saga modules
 saga_lib_path = os.path.join(project_root, "agent_frameworks", "sagallm_lib")
 if saga_lib_path not in sys.path:
@@ -110,7 +118,7 @@ class CompensatableSagaAgent(Agent):
         try:
             # Use Gemini directly (bypassing ReactAgent's OpenAI requirement)
             gemini_model = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
+                model="gemini-flash-latest",
                 temperature=0,
                 convert_system_message_to_human=True
             )
@@ -144,14 +152,18 @@ Example format: {{"status": "success", "result": "..."}} or {{"status": "error",
             # Each agent makes its own LLM call in SagaLLM
             # This is the key difference: SagaLLM = N agents = N LLM calls
             # Compensation = 1 agent = 1 LLM call (or fewer)
-            
+
             # Track this agent's LLM call
             if not hasattr(self, '_agent_llm_calls'):
                 self._agent_llm_calls = 0
                 self._agent_tokens = {"input": 0, "output": 0}
-            
+
             self._agent_llm_calls += 1
-            response = gemini_model.invoke(messages)
+            # Invoke with LangSmith run name for tracing
+            response = gemini_model.invoke(
+                messages,
+                config={"run_name": f"sagallm_agent_{self.name}"}
+            )
             result_text = response.content
             
             # Track token usage
