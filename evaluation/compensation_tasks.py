@@ -247,6 +247,73 @@ COMPENSATION_TASK_DEFINITIONS = {
         evaluation_weights={
             "state_consistency": 1.0
         }
+    ),
+    
+    "MONGODB-ACID": TaskDefinition(
+        task_id="MONGODB-ACID",
+        name="User Profile Creation (MongoDB ACID Transaction)",
+        category=TaskCategory.LOGISTICS,
+        description=(
+            "Atomic Transaction: Create a complete user profile in MongoDB with multiple steps. "
+            "1. Create user account"
+            "2. Update user profile with additional information"
+            "3. Add user preferences"
+            "4. Create user session (will fail if user has 5+ active sessions)"
+            "If session creation fails, all previous database operations must be rolled back "
+            "to maintain database consistency. This tests real-world database transaction compensation."
+        ),
+        goals=[
+            TaskGoal("create_user", "Create new user account in database", 0.25),
+            TaskGoal("update_profile", "Update user profile information", 0.25),
+            TaskGoal("add_preferences", "Add user preferences", 0.25),
+            TaskGoal("create_session", "Create user session (Will Fail)", 0.25)
+        ],
+        constraints=[
+            TaskConstraint(
+                "atomic_transaction",
+                "dependency",
+                "All database operations must succeed or none should exist",
+                {"dependencies": [
+                    ["create_user", "update_profile"],
+                    ["update_profile", "add_preferences"],
+                    ["add_preferences", "create_session"]
+                ]}
+            ),
+            TaskConstraint(
+                "session_limit",
+                "capacity",
+                "User cannot have more than 5 active sessions",
+                {"max_sessions": 5}
+            )
+        ],
+        resources={
+            "user_id": "test_user_123",
+            "user_data": {
+                "name": "John Doe",
+                "email": "john.doe@example.com",
+                "role": "premium"
+            },
+            "profile_updates": {
+                "bio": "Software engineer and AI enthusiast",
+                "location": "San Francisco, CA"
+            },
+            "preferences": {
+                "theme": "dark",
+                "notifications": True,
+                "language": "en"
+            },
+            "session_data": {
+                "device": "mobile",
+                "ip": "192.168.1.100"
+            },
+            "existing_sessions": 5  # User already has 5 sessions, so new session will fail
+        },
+        disruption_scenarios=[
+            {"type": "session_limit_exceeded", "trigger": "create_session", "max_sessions": 5}
+        ],
+        evaluation_weights={
+            "state_consistency": 1.0  # Database consistency is critical
+        }
     )
 }
 

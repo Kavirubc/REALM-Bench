@@ -20,10 +20,6 @@ from multi_agent.crew import Crew
 from planning_agent.react_agent import ReactAgent
 from tool_agent.tool import Tool
 
-print("✅ multi_agent.crew imported successfully!")
-print("✅ planning_agent.react_agent imported successfully!")
-print("✅ tool_agent.tool imported successfully!")
-
 # # Try importing Saga again
 # try:
 #     from multi_agent.crew import Crew

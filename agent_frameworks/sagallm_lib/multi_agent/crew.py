@@ -6,25 +6,13 @@ from graphviz import Digraph  # type: ignore
 import sys
 import os
 
-# Get the project root by going up one level from 'applications'
-project_root = os.path.abspath(os.path.join(os.getcwd(), '..'))
-print(f"📂 Project Root: {project_root}")
-
-# Append 'src' directory to sys.path
-src_path = os.path.join(project_root, 'src')
-sys.path.append(src_path)
-
-# Print sys.path to verify
-print("🔍 Updated sys.path:")
-for path in sys.path:
-    print(path)
-
-# Try importing Saga again
+# Try to import custom_print from utils.logging
 try:
     from utils.logging import custom_print
-    print("✅ utils.logging imported successfully!")
-except ModuleNotFoundError as e:
-    print("❌ Import failed:", e)
+except ImportError:
+    # Fallback: simple print function (quiet mode for benchmarks)
+    def custom_print(message: str) -> None:
+        pass
 
 
 class Crew:

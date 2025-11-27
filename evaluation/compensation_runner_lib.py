@@ -25,7 +25,7 @@ sys.path.append(project_root)
 
 # Configure LangSmith tracing
 os.environ.setdefault("LANGSMITH_TRACING", "true")
-os.environ.setdefault("LANGSMITH_PROJECT", "c-benchmark")
+os.environ.setdefault("LANGSMITH_PROJECT", "realm-bench-compensation-lib")
 
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -40,6 +40,20 @@ from .compensation_runner import (
     check_capacity
 )
 
+# Import MongoDB tools for database workflows
+try:
+    from .mongodb_tools import (
+        create_user, delete_user,
+        update_user_profile, revert_user_profile,
+        add_user_preferences, remove_user_preferences,
+        create_user_session, delete_user_session,
+        get_user_info
+    )
+    MONGODB_TOOLS_AVAILABLE = True
+except ImportError:
+    MONGODB_TOOLS_AVAILABLE = False
+    logger.warning("MongoDB tools not available")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -49,12 +63,31 @@ COMPENSATION_MAPPING = {
     "allocate_resource": "deallocate_resource",
 }
 
+# MongoDB compensation mapping
+MONGODB_COMPENSATION_MAPPING = {
+    "create_user": "delete_user",
+    "update_user_profile": "revert_user_profile",
+    "add_user_preferences": "remove_user_preferences",
+    "create_user_session": "delete_user_session",
+}
+
 # All tools for the agent
 ALL_TOOLS = [
     book_vehicle, cancel_vehicle_booking,
     allocate_resource, deallocate_resource,
     check_capacity,
 ]
+
+# Add MongoDB tools if available
+if MONGODB_TOOLS_AVAILABLE:
+    ALL_TOOLS.extend([
+        create_user, delete_user,
+        update_user_profile, revert_user_profile,
+        add_user_preferences, remove_user_preferences,
+        create_user_session, delete_user_session,
+        get_user_info
+    ])
+    COMPENSATION_MAPPING.update(MONGODB_COMPENSATION_MAPPING)
 
 
 class CompensationLibRunner(BaseFrameworkRunner):
@@ -77,19 +110,20 @@ class CompensationLibRunner(BaseFrameworkRunner):
         )
 
         # Create agent with compensation middleware using the library
+        # Note: The LLM should NOT know about compensation - it just tries to complete tasks
+        # Compensation happens automatically in the background
         self.agent = create_comp_agent(
             model=self.llm,
             tools=ALL_TOOLS,
             compensation_mapping=COMPENSATION_MAPPING,
-            system_prompt="""You are a task execution agent with automatic rollback capabilities.
+            system_prompt="""You are a helpful assistant that helps coordinate events and manage resources.
 
-Execute the tasks step by step using the available tools:
-- book_vehicle(vehicle_id, passenger_id, route): Book a vehicle/venue
-- allocate_resource(resource_type, resource_id, amount): Allocate a resource
-- check_capacity(resource_type, requested_amount): Check if capacity is available (fails if amount > 50)
+You have access to tools that can:
+- book_vehicle(vehicle_id, passenger_id, route): Book vehicles or venues for transportation or events
+- allocate_resource(resource_type, resource_id, amount): Allocate resources like catering services
+- check_capacity(resource_type, requested_amount): Check if a resource has enough capacity available
 
-If any step fails, the system automatically rolls back previous operations.
-Execute tasks in the exact order specified. Do not skip steps."""
+When given a task, use the appropriate tools to complete it. Read the tool descriptions carefully to understand what parameters they need."""
         )
 
         logger.info("CompensationLibRunner initialized with langchain-compensation library")
@@ -112,7 +146,17 @@ Execute tasks in the exact order specified. Do not skip steps."""
             # CompensationMiddleware will track and rollback on failure
             result = self.agent.invoke(
                 {"messages": [HumanMessage(content=user_message)]},
-                config={"run_name": f"compensation_lib_{task_id}"}
+                config={
+                    "run_name": f"compensation-lib-{task_id}",
+                    "tags": ["compensation-lib", "single-agent", task_id, "mongodb-workflow"],
+                    "metadata": {
+                        "framework": "compensation_lib",
+                        "task_id": task_id,
+                        "task_name": task_definition.name,
+                        "agent_type": "single-agent",
+                        "workflow": "mongodb-user-profile"
+                    }
+                }
             )
 
             execution_time = time.time() - start_time
@@ -131,47 +175,49 @@ Execute tasks in the exact order specified. Do not skip steps."""
             return self._create_execution_result([], [], [])
 
     def _build_task_message(self, task_id: str) -> str:
-        """Build task-specific message matching SagaLLM's tasks."""
+        """Build natural task descriptions without hardcoded parameters or failure hints."""
 
         if task_id == "P5-ACID":
-            return """Execute this wedding planning task with exactly 3 steps in order:
+            return """You are planning a wedding event. You need to coordinate the following:
 
-Step 1: Book venue using book_vehicle with:
-- vehicle_id: "venue_1"
-- passenger_id: "wedding_party"
-- route: "main"
+1. Book a venue for the wedding ceremony and reception
+2. Arrange catering services for 200 guests
+3. Book a live band for entertainment - they need to accommodate a large audience of 100 people
 
-Step 2: Book caterer using allocate_resource with:
-- resource_type: "caterer"
-- resource_id: "cat_1"
-- amount: 10
-
-Step 3: Check band capacity using check_capacity with:
-- resource_type: "band"
-- requested_amount: 100
-
-Note: Step 3 will fail because requested_amount > 50.
-The system should automatically rollback steps 1 and 2."""
+Please complete all three bookings. Use the available tools to make the necessary arrangements."""
 
         elif task_id == "P6-ACID":
-            return """Execute this Thanksgiving dinner ordering task with exactly 3 steps in order:
+            return """You are organizing a large Thanksgiving dinner for your extended family. You need to:
 
-Step 1: Order sides using book_vehicle with:
-- vehicle_id: "sides_truck"
-- passenger_id: "food"
-- route: "kitchen"
+1. Order side dishes for the meal
+2. Order drinks and beverages
+3. Order a large turkey - you need enough for 100 people
 
-Step 2: Order drinks using book_vehicle with:
-- vehicle_id: "drinks_truck"
-- passenger_id: "beverages"
-- route: "bar"
+Please place all the orders using the available tools."""
 
-Step 3: Check turkey capacity using check_capacity with:
-- resource_type: "turkey"
-- requested_amount: 100
+        elif task_id == "MONGODB-ACID":
+            # Get user_id from task resources
+            task_def = None
+            try:
+                from .task_definitions import TASK_DEFINITIONS
+                from .compensation_tasks import COMPENSATION_TASK_DEFINITIONS
+                all_tasks = {**TASK_DEFINITIONS, **COMPENSATION_TASK_DEFINITIONS}
+                task_def = all_tasks.get(task_id)
+            except:
+                pass
+            
+            user_id = "test_user_123"  # Default
+            if task_def and task_def.resources:
+                user_id = task_def.resources.get("user_id", user_id)
+            
+            return f"""You need to set up a complete user profile in the database for user ID: {user_id}. This involves:
 
-Note: Step 3 will fail because requested_amount > 50.
-The system should automatically rollback steps 1 and 2."""
+1. Creating a new user account with user_id: {user_id}
+2. Updating the user's profile with additional information
+3. Adding user preferences for the application
+4. Creating an active session for the user
+
+Please complete all steps to fully set up the user profile. Use the available database tools to perform these operations. Make sure to use the user_id: {user_id} for all operations."""
 
         else:
             return f"Execute task: {task_id}"

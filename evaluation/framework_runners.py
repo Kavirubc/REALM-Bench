@@ -444,12 +444,19 @@ def get_framework_runners() -> Dict[str, BaseFrameworkRunner]:
     except Exception as e:
         print(f"Compensation runner not available: {e}")
 
-    # Add compensation_lib runner (direct langchain-compensation)
+    # Add compensation_lib runner (direct langchain-compensation - single agent)
     try:
         from .compensation_runner_lib import CompensationLibRunner
         runners['compensation_lib'] = CompensationLibRunner()
     except Exception as e:
         print(f"CompensationLib runner not available: {e}")
+
+    # Add compensation_multiagent runner (langchain-compensation with multiple agents)
+    try:
+        from .compensation_runner_multiagent import MultiAgentCompensationRunner
+        runners['compensation_multiagent'] = MultiAgentCompensationRunner()
+    except Exception as e:
+        print(f"CompensationMultiAgent runner not available: {e}")
 
     # Add SagaLLM runner
     try:

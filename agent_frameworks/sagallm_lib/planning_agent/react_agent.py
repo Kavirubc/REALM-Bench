@@ -9,20 +9,7 @@ from openai import OpenAI
 import sys
 import os
 
-# Get the project root by going up one level from 'applications'
-project_root = os.path.abspath(os.path.join(os.getcwd(), '..'))
-print(f"📂 Project Root: {project_root}")
-
-# Append 'src' directory to sys.path
-src_path = os.path.join(project_root, 'src')
-sys.path.append(src_path)
-
-# Print sys.path to verify
-print("🔍 Updated sys.path:")
-for path in sys.path:
-    print(path)
-
-# Try importing Saga again
+# Try importing required modules
 try:
     from tool_agent.tool import Tool
     from tool_agent.tool import validate_arguments
@@ -31,12 +18,19 @@ try:
     from utils.completions import completions_create
     from utils.completions import update_chat_history
     from utils.extraction import extract_tag_content
-
-    print("✅ tool_agent.tool imported successfully!")
-    print("✅ utils.completions imported successfully!")
-    print("✅ utils.extraction imported successfully!")
 except ModuleNotFoundError as e:
-    print("❌ Import failed:", e)
+    # If relative import fails, try to add path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    lib_root = os.path.dirname(os.path.dirname(current_dir))
+    if lib_root not in sys.path:
+        sys.path.insert(0, lib_root)
+    from tool_agent.tool import Tool
+    from tool_agent.tool import validate_arguments
+    from utils.completions import build_prompt_structure
+    from utils.completions import ChatHistory
+    from utils.completions import completions_create
+    from utils.completions import update_chat_history
+    from utils.extraction import extract_tag_content
 
 load_dotenv()
 
@@ -99,12 +93,18 @@ class ReactAgent:
         tools: Union[Tool, List[Tool]],
         model: str = "gpt-4o",
         system_prompt: str = BASE_SYSTEM_PROMPT,
+        client=None,
     ) -> None:
-        self.client = OpenAI()
+        # Allow custom client (e.g., Gemini wrapper) to be passed in
+        if client is not None:
+            self.client = client
+        else:
+            self.client = OpenAI()
         self.model = model
         self.system_prompt = system_prompt
         self.tools = tools if isinstance(tools, list) else [tools]
         self.tools_dict = {tool.name: tool for tool in self.tools}
+        self.tools_Dict = self.tools_dict  # Alias for compatibility (typo in original code)
 
     def add_tool_signatures(self) -> str:
         """
@@ -127,9 +127,27 @@ class ReactAgent:
         """
         observations = {}
         for tool_call_str in tool_calls_content:
-            tool_call = json.loads(tool_call_str)
-            tool_name = tool_call["name"]
-            tool = self.tools_Dict[tool_name]
+            try:
+                # Handle both string and dict inputs
+                if isinstance(tool_call_str, str):
+                    tool_call_str = tool_call_str.strip()  # Remove leading/trailing whitespace
+                    if not tool_call_str:
+                        continue  # Skip empty strings
+                    tool_call = json.loads(tool_call_str)
+                else:
+                    tool_call = tool_call_str
+                
+                tool_name = tool_call.get("name")
+                if not tool_name or tool_name not in self.tools_Dict:
+                    print(Fore.YELLOW + f"Warning: Unknown tool '{tool_name}', skipping...")
+                    continue
+                tool = self.tools_Dict[tool_name]
+            except json.JSONDecodeError as e:
+                print(Fore.YELLOW + f"Warning: Could not parse tool call '{tool_call_str}': {e}, skipping...")
+                continue
+            except KeyError as e:
+                print(Fore.YELLOW + f"Warning: Missing required field in tool call: {e}, skipping...")
+                continue
 
             print(Fore.GREEN + f"\nUsing Tool: {tool_name}")
 
@@ -197,10 +215,16 @@ class ReactAgent:
 
                 update_chat_history(chat_history, completion, "assistant")
 
-                print(Fore.MAGENTA + f"\nThought: {thought.content[0]}")
+                if thought.found and thought.content:
+                    print(Fore.MAGENTA + f"\nThought: {thought.content[0]}")
+                else:
+                    print(Fore.MAGENTA + f"\nThought: (No thought tag found)")
 
-                if tool_calls.found:
-                    observations = self.process_tool_calls(tool_calls.content)
+                if tool_calls.found and tool_calls.content:
+                    # Clean up tool call content - remove newlines and whitespace
+                    cleaned_content = [c.strip() for c in tool_calls.content if c.strip()]
+                    if cleaned_content:
+                        observations = self.process_tool_calls(cleaned_content)
                     print(Fore.BLUE + f"\nObservations: {observations}")
                     update_chat_history(chat_history, f"{observations}", "user")
 

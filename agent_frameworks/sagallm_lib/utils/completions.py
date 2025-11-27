@@ -1,19 +1,27 @@
 from typing import Optional, List
+import os
 
 def completions_create(client, messages: list, model: str) -> str:
     """
     Sends a request to the client's `completions.create` method to interact with the language model.
+    Supports both OpenAI and Gemini clients.
 
     Args:
-        client (OpenAI): The OpenAI client object
+        client: The client object (OpenAI or Gemini wrapper)
         messages (list[dict]): A list of message objects containing chat history for the model.
         model (str): The model to use for generating tool calls and responses.
 
     Returns:
         str: The content of the model's response.
     """
-    response = client.chat.completions.create(messages=messages, model=model,temperature=0.3, max_tokens=3000 )
-    return str(response.choices[0].message.content)
+    # Check if it's a Gemini client (has _is_gemini attribute)
+    if hasattr(client, '_is_gemini') and client._is_gemini:
+        # Use Gemini API - returns string directly
+        return client.chat.completions.create(messages=messages, model=model, temperature=0.3, max_tokens=3000)
+    else:
+        # Use OpenAI API (original behavior)
+        response = client.chat.completions.create(messages=messages, model=model, temperature=0.3, max_tokens=3000)
+        return str(response.choices[0].message.content)
 
 
 def build_prompt_structure(prompt: str, role: str, tag: str = "") -> dict:
