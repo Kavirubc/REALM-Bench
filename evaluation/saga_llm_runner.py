@@ -1,9 +1,8 @@
 """
-SagaLLM Framework Runner for REALM-Bench
+SagaLLM Framework Runner for REALM-Bench P1-P11 Tasks
 
-This module provides a runner for the SagaLLM framework to compare against
-langchain-compensation. It attempts to implement ACID transactions using
-SagaLLM's coordination primitives.
+This module provides a runner for SagaLLM framework to compare against
+langchain-compensation on all 11 REALM-Bench planning scenarios.
 """
 
 import time
@@ -11,43 +10,28 @@ import os
 import sys
 import json
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from dotenv import load_dotenv
 
-# Load environment variables FIRST (before any langchain imports)
 load_dotenv()
 
-# Add project paths
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
-# Configure LangSmith tracing
 os.environ.setdefault("LANGSMITH_TRACING", "true")
 os.environ.setdefault("LANGSMITH_PROJECT", "realm-bench-sagallm")
-# Add SagaLLM lib path - IMPORTANT: This must be added before importing any Saga modules
+
 saga_lib_path = os.path.join(project_root, "agent_frameworks", "sagallm_lib")
 if saga_lib_path not in sys.path:
     sys.path.insert(0, saga_lib_path)
-    print(f"Inserted SagaLLM path at start: {saga_lib_path}")
-
-print(f"Files in {saga_lib_path}: {os.listdir(saga_lib_path)}")
-if os.path.exists(os.path.join(saga_lib_path, "multi_agent")):
-    print(f"multi_agent contents: {os.listdir(os.path.join(saga_lib_path, 'multi_agent'))}")
 
 from evaluation.task_definitions import TaskDefinition
 from evaluation.framework_runners import BaseFrameworkRunner
-from evaluation.compensation_runner import (
-    book_vehicle, cancel_vehicle_booking,
-    allocate_resource, deallocate_resource,
-    assign_task, unassign_task,
-    schedule_pickup, cancel_pickup,
-    process_payment, check_capacity
+from evaluation.planning_tools import (
+    TASK_TOOLS, COMPENSATION_MAPPING, reset_state
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import StructuredTool
-from langchain_core.messages import AIMessage
 
-# Try to import SagaLLM components
 try:
     from multi_agent.saga import Saga
     from multi_agent.agent import Agent
@@ -56,529 +40,291 @@ except ImportError as e:
     print(f"Warning: SagaLLM not available: {e}")
     SAGA_AVAILABLE = False
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mock OpenAI key to prevent SagaLLM crash on init (since we bypass LLM for this test)
 if "OPENAI_API_KEY" not in os.environ:
-    os.environ["OPENAI_API_KEY"] = "sk-mock-key-for-testing-structure-only"
+    os.environ["OPENAI_API_KEY"] = "sk-mock-key-for-testing"
 
-# Import MongoDB tools for database workflows (AFTER logger is defined)
-try:
-    from evaluation.mongodb_tools import (
-        create_user, delete_user,
-        update_user_profile, revert_user_profile,
-        add_user_preferences, remove_user_preferences,
-        create_user_session, delete_user_session,
-        get_user_info
-    )
-    MONGODB_TOOLS_AVAILABLE = True
-except ImportError:
-    MONGODB_TOOLS_AVAILABLE = False
-    logger.warning("MongoDB tools not available")
 
 class CompensatableSagaAgent(Agent):
-    """
-    Extended Saga Agent that supports actual tool compensation.
-    SagaLLM's default Agent.rollback() only prints text.
-    We override it to actually call a compensation tool.
-    
-    This version uses the ACTUAL LLM (Gemini) for fair comparison with langchain-compensation.
-    """
+    """Extended Saga Agent with actual tool compensation."""
+
     def __init__(self, name, backstory, task_description, tools=None, compensation_tool=None):
-        # Convert LangChain tools to SagaLLM Tool format if needed
         saga_tools = []
         if tools:
             for tool in tools:
                 if isinstance(tool, StructuredTool):
-                    # Convert LangChain tool to SagaLLM Tool
                     from tool_agent.tool import Tool as SagaTool
-                    # Get proper type mapping from LangChain schema
                     properties = {}
                     if hasattr(tool, 'args_schema') and tool.args_schema:
                         schema_props = tool.args_schema.schema().get("properties", {})
                         for param_name, param_info in schema_props.items():
                             param_type = param_info.get("type", "string")
-                            # Map JSON schema types to Python types
-                            type_mapping = {
-                                "string": "str",
-                                "integer": "int",
-                                "number": "float",
-                                "boolean": "bool"
-                            }
-                            python_type = type_mapping.get(param_type, "str")
-                            properties[param_name] = {"type": python_type}
-                    
+                            type_mapping = {"string": "str", "integer": "int", "number": "float", "boolean": "bool"}
+                            properties[param_name] = {"type": type_mapping.get(param_type, "str")}
+
                     saga_tool = SagaTool(
                         name=tool.name,
                         fn=tool.func,
                         fn_signature=json.dumps({
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": {
-                                "properties": properties
-                            }
+                            "parameters": {"properties": properties}
                         })
                     )
                     saga_tools.append(saga_tool)
                 else:
                     saga_tools.append(tool)
-        
-        # Create Gemini client for this agent (same as langchain-compensation uses)
+
         from utils.gemini_client import GeminiClientWrapper
         self._gemini_client = GeminiClientWrapper(model="gemini-2.0-flash", temperature=0)
-        
-        # Initialize parent Agent class (this will create a ReactAgent with OpenAI)
+
         super().__init__(
             name=name,
             backstory=backstory,
             task_description=task_description,
             tools=saga_tools,
-            llm="gemini-2.0-flash"  # Model name for logging
+            llm="gemini-2.0-flash"
         )
-        
-        # Replace ReactAgent with a custom one that tracks tool results
+
         from planning_agent.react_agent import ReactAgent
-        
+
         class ToolTrackingReactAgent(ReactAgent):
-            """ReactAgent that tracks tool execution results for compensation"""
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.last_tool_results = []
-                # Ensure tools_dict exists (ReactAgent uses tools_dict, not tools_Dict)
                 if not hasattr(self, 'tools_dict'):
                     self.tools_dict = {tool.name: tool for tool in self.tools}
-            
+
             def process_tool_calls(self, tool_calls_content: list) -> dict:
-                """Override to track tool results"""
                 try:
                     observations = super().process_tool_calls(tool_calls_content)
-                    # Store results for compensation
                     for tool_call_str in tool_calls_content:
                         try:
-                            # Handle both string and dict inputs
-                            if isinstance(tool_call_str, str):
-                                tool_call = json.loads(tool_call_str)
-                            else:
-                                tool_call = tool_call_str
-                            
+                            tool_call = json.loads(tool_call_str) if isinstance(tool_call_str, str) else tool_call_str
                             tool_name = tool_call.get("name", "unknown")
                             tool_id = tool_call.get("id", 0)
-                            # Observations dict uses tool_id as key
                             result = observations.get(tool_id, "")
-                            # Convert result to string if needed
-                            if not isinstance(result, str):
-                                result = str(result)
-                            self.last_tool_results.append({
-                                "tool_name": tool_name,
-                                "result": result
-                            })
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Could not parse tool call as JSON: {tool_call_str}, error: {e}")
+                            self.last_tool_results.append({"tool_name": tool_name, "result": str(result)})
                         except Exception as e:
                             logger.warning(f"Error tracking tool result: {e}")
-                            import traceback
-                            logger.warning(traceback.format_exc())
                     return observations
                 except Exception as e:
                     logger.error(f"Error in process_tool_calls: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
                     raise
-        
+
         self.react_agent = ToolTrackingReactAgent(
             tools=saga_tools,
             model="gemini-2.0-flash",
             system_prompt=backstory,
             client=self._gemini_client
         )
-        
+
         self.compensation_tool = compensation_tool
         self.execution_result = None
 
     def run(self):
-        """
-        Run agent using LLM (Gemini) to decide which tools to call.
-        This provides a fair comparison with langchain-compensation which also uses LLM.
-        """
-        print(f"🚀 {self.name} executing with LLM...")
-
+        print(f"🚀 {self.name} executing...")
         try:
-            # Clear previous tool results
             if hasattr(self.react_agent, 'last_tool_results'):
                 self.react_agent.last_tool_results = []
-            
-            # Use the LLM via ReactAgent (same as normal Agent.run() but we need to extract tool results)
-            # Create a prompt that tells the LLM what to do
-            user_message = self._build_llm_prompt()
-            
-            # Add LangSmith tracing for individual agent execution
-            from langsmith import traceable
-            
-            @traceable(
-                name=f"sagallm-agent-{self.name.replace(' ', '-').lower()}",
-                run_type="chain",
-                tags=["sagallm", "agent", self.name.replace(" ", "-").lower()],
-                metadata={
-                    "agent_name": self.name,
-                    "agent_type": "sagallm-compensatable",
-                    "has_compensation": self.compensation_tool is not None
-                }
-            )
-            def run_agent_with_tracing():
-                return self.react_agent.run(user_msg=user_message, max_rounds=5)
-            
-            # Call the LLM via ReactAgent with tracing
-            output = run_agent_with_tracing()
-            
-            # Extract tool execution result from tracked tool results
-            # Get the last tool result (the one we care about for compensation)
+
+            user_message = self.task_description
+            output = self.react_agent.run(user_msg=user_message, max_rounds=5)
+
             if hasattr(self.react_agent, 'last_tool_results') and self.react_agent.last_tool_results:
-                # Use the last tool's result
-                last_result = self.react_agent.last_tool_results[-1]["result"]
-                self.execution_result = last_result
-                result_str = str(last_result)
+                self.execution_result = self.react_agent.last_tool_results[-1]["result"]
+                result_str = str(self.execution_result)
             else:
-                # Fallback: try to extract JSON from output
-                import re
-                json_match = re.search(r'\{[^}]+\}', output)
-                if json_match:
-                    try:
-                        result_data = json.loads(json_match.group())
-                        self.execution_result = json.dumps(result_data)
-                        result_str = self.execution_result
-                    except json.JSONDecodeError:
-                        self.execution_result = output
-                        result_str = output
-                else:
-                    self.execution_result = output
-                    result_str = output
-            
-            # Check for failure
-            if "error" in result_str.lower() or "capacity exceeded" in result_str.lower():
+                self.execution_result = output
+                result_str = output
+
+            if "error" in result_str.lower():
                 try:
                     result_data = json.loads(result_str)
                     if result_data.get("status") == "error":
                         raise Exception(f"Tool execution failed: {result_str}")
-                except (json.JSONDecodeError, KeyError):
-                    if "error" in result_str.lower() or "capacity exceeded" in result_str.lower():
+                except json.JSONDecodeError:
+                    if "error" in result_str.lower():
                         raise Exception(f"Tool execution failed: {result_str}")
-            
+
             return result_str
 
         except Exception as e:
             self.execution_result = str(e)
-            import traceback
             logger.error(f"Error in {self.name}: {e}")
-            logger.error(traceback.format_exc())
             raise e
-    
-    def _build_llm_prompt(self) -> str:
-        """Build natural prompts for the LLM to execute tasks without hardcoded parameters."""
-        # P5-ACID: Wedding Logistics
-        if "Venue" in self.name:
-            return """You are responsible for booking the wedding venue. 
-Book a venue for the wedding ceremony and reception. 
-Use the book_vehicle tool to make the booking."""
-        
-        elif "Caterer" in self.name:
-            return """You are responsible for arranging catering services.
-Book catering for 200 wedding guests. 
-Use the allocate_resource tool to arrange the catering service."""
-        
-        elif "Band" in self.name:
-            return """You are responsible for booking entertainment.
-Book a live band that can accommodate a large audience of 100 people.
-First check if the band has capacity for 100 people using the check_capacity tool."""
-        
-        # P6-ACID: Thanksgiving Dinner
-        elif "Sides" in self.name:
-            return """You are responsible for ordering side dishes.
-Order side dishes for the Thanksgiving dinner.
-Use the book_vehicle tool to place the order."""
-        
-        elif "Drinks" in self.name:
-            return """You are responsible for ordering beverages.
-Order drinks for the Thanksgiving dinner.
-Use the book_vehicle tool to place the order."""
-        
-        elif "Turkey" in self.name:
-            return """You are responsible for ordering the main dish.
-Order a large turkey for 100 people for Thanksgiving dinner.
-First check if there's enough turkey available using the check_capacity tool."""
-        
-        # Fallback to task description
-        return self.task_description
 
     def rollback(self):
-        """Override to actually execute compensation"""
         print(f"🔄 Rolling back {self.name}'s operation...")
-        
         if self.compensation_tool and self.execution_result:
             try:
-                # Parse result to get ID for compensation
                 result_str = str(self.execution_result)
                 try:
                     result_data = json.loads(result_str)
                 except (json.JSONDecodeError, TypeError):
-                    # If not JSON, try to extract ID from string
                     result_data = {}
-                    if "booking_id" in result_str:
-                        import re
-                        match = re.search(r'"booking_id":\s*"([^"]+)"', result_str)
-                        if match:
-                            result_data["booking_id"] = match.group(1)
-                    elif "allocation_id" in result_str:
-                        import re
-                        match = re.search(r'"allocation_id":\s*"([^"]+)"', result_str)
-                        if match:
-                            result_data["allocation_id"] = match.group(1)
-                
-                # Map result ID to compensation arg
+
                 comp_args = {}
-                if "booking_id" in result_data:
-                    comp_args["booking_id"] = result_data["booking_id"]
-                elif "allocation_id" in result_data:
-                    comp_args["allocation_id"] = result_data["allocation_id"]
-                
+                for id_field in ["visit_id", "assignment_id", "booking_id", "schedule_id",
+                                "deployment_id", "allocation_id", "order_id"]:
+                    if id_field in result_data:
+                        comp_args[id_field] = result_data[id_field]
+                        break
+
                 if comp_args:
-                    # Execute compensation tool
                     if hasattr(self.compensation_tool, 'func'):
                         res = self.compensation_tool.func(**comp_args)
-                    elif hasattr(self.compensation_tool, 'run'):
-                        res = self.compensation_tool.run(**comp_args)
                     else:
                         res = "Compensation tool not callable"
                     print(f"✅ Compensation executed: {res}")
-                else:
-                    print(f"⚠️ Could not extract ID for compensation from {self.execution_result}")
             except Exception as e:
                 print(f"❌ Compensation failed: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"⚠️ No compensation tool or result available for {self.name}")
+
+
+# Agent configurations for each task
+TASK_AGENTS = {
+    "P1": [
+        {"name": "Location Planner", "task": "Plan optimal route visiting Library, Student Center, Engineering, Sports Complex"},
+        {"name": "Time Validator", "task": "Check all locations are open at planned times (9AM-5PM)"},
+        {"name": "Tour Executor", "task": "Execute visits to all locations in planned order"},
+    ],
+    "P2": [
+        {"name": "Guide Coordinator", "task": "Check availability of 3 tour guides"},
+        {"name": "Group Assigner", "task": "Assign guides to 4 visitor groups"},
+        {"name": "Schedule Validator", "task": "Validate no guide has more than 2 groups"},
+    ],
+    "P3": [
+        {"name": "Vehicle Manager", "task": "Check capacity of 3 vehicles (4 passengers each)"},
+        {"name": "Ride Planner", "task": "Plan rides for 5 passengers with optimal grouping"},
+        {"name": "Booking Agent", "task": "Book all rides and handle capacity issues"},
+    ],
+    "P4": [
+        {"name": "Route Planner", "task": "Plan initial routes for all rides"},
+        {"name": "Disruption Handler", "task": "Monitor and handle route disruptions"},
+        {"name": "Rerouting Agent", "task": "Update routes when disruptions occur"},
+    ],
+    "P5": [
+        {"name": "Venue Agent", "task": "Book venue (grand_hall) for 200 guests"},
+        {"name": "Caterer Agent", "task": "Book catering (gourmet_catering) for 200 guests"},
+        {"name": "Entertainment Agent", "task": "Book band (jazz_band) for 100 audience"},
+    ],
+    "P6": [
+        {"name": "Pickup Coordinator", "task": "Schedule airport pickups for arriving family"},
+        {"name": "Kitchen Planner", "task": "Assign cooking tasks to family members"},
+        {"name": "Capacity Checker", "task": "Check kitchen can handle all cooks"},
+    ],
+    "P7": [
+        {"name": "Team Deployer", "task": "Deploy medical and rescue teams to regions"},
+        {"name": "Supply Allocator", "task": "Allocate supplies to affected regions"},
+        {"name": "Resource Validator", "task": "Validate supply availability"},
+    ],
+    "P8": [
+        {"name": "Route Checker", "task": "Check wedding transport routes for closures"},
+        {"name": "Transport Booker", "task": "Book wedding transport avoiding blocked routes"},
+        {"name": "Venue Coordinator", "task": "Book reception venue"},
+    ],
+    "P9": [
+        {"name": "Flight Monitor", "task": "Check flight statuses for delays"},
+        {"name": "Pickup Scheduler", "task": "Schedule/reschedule pickups based on flights"},
+        {"name": "Dinner Coordinator", "task": "Coordinate cooking around arrivals"},
+    ],
+    "P10": [
+        {"name": "Procurement Agent", "task": "Check supplier capacities and place orders"},
+        {"name": "Order Manager", "task": "Manage component orders from suppliers"},
+        {"name": "Assembly Scheduler", "task": "Schedule assembly at facilities"},
+    ],
+    "P11": [
+        {"name": "Machine Monitor", "task": "Check machine availability (machine_1 may be down)"},
+        {"name": "Job Scheduler", "task": "Schedule jobs on available machines"},
+        {"name": "Conflict Resolver", "task": "Resolve scheduling conflicts"},
+    ],
+}
 
 
 class SagaLLMRunner(BaseFrameworkRunner):
-    """Runner for SagaLLM framework"""
-    
+    """Runner for SagaLLM framework on P1-P11 tasks."""
+
     def __init__(self):
         super().__init__()
         self.saga = None
-        self._llm_call_count = 0
-        self._total_tokens = {"input": 0, "output": 0}
-    
+
     def __call__(self, task_definition: TaskDefinition) -> Dict[str, Any]:
-        # Reset counters for each task
-        self._llm_call_count = 0
-        self._total_tokens = {"input": 0, "output": 0}
         if not SAGA_AVAILABLE:
-            raise RuntimeError("SagaLLM not installed or configured properly")
-            
+            raise RuntimeError("SagaLLM not installed")
+
         start_time = time.time()
         self._record_memory_usage()
-        
+        reset_state()
+
+        task_id = task_definition.task_id
+        logger.info(f"Running SagaLLM on task {task_id}")
+
         try:
             self.saga = Saga()
-            
-            # Dynamically create agents based on goals
-            agents = []
-            
-            # Map goals to agents
-            # For P5-ACID: Venue, Caterer, Band
-            if "P5-ACID" in task_definition.task_id:
-                # Agent 1: Venue (Succeeds)
-                a1 = CompensatableSagaAgent(
-                    name="Venue Agent",
-                    backstory="Book the wedding venue",
-                    task_description="Book venue using book_vehicle",
-                    tools=[book_vehicle],
-                    compensation_tool=cancel_vehicle_booking
-                )
+            agents = self._create_agents_for_task(task_id)
 
-                # Agent 2: Caterer (Succeeds)
-                a2 = CompensatableSagaAgent(
-                    name="Caterer Agent",
-                    backstory="Book the catering service",
-                    task_description="Book caterer using allocate_resource",
-                    tools=[allocate_resource],
-                    compensation_tool=deallocate_resource
-                )
+            if not agents:
+                raise RuntimeError(f"No agents configured for task {task_id}")
 
-                # Agent 3: Band (Fails - capacity > 50)
-                a3 = CompensatableSagaAgent(
-                    name="Band Agent",
-                    backstory="Book the band",
-                    task_description="Check band capacity using check_capacity",
-                    tools=[check_capacity],
-                    compensation_tool=None
-                )
-
-                # Define Dependencies: A1 -> A2 -> A3
-                a2.add_dependency(a1)
-                a3.add_dependency(a2)
-
-                agents = [a1, a2, a3]
-
-            elif "P6-ACID" in task_definition.task_id:
-                # Agent 1: Sides
-                a1 = CompensatableSagaAgent(
-                    name="Sides Agent",
-                    backstory="Order side dishes",
-                    task_description="Order sides using book_vehicle",
-                    tools=[book_vehicle],
-                    compensation_tool=cancel_vehicle_booking
-                )
-                # Agent 2: Drinks
-                a2 = CompensatableSagaAgent(
-                    name="Drinks Agent",
-                    backstory="Order drinks",
-                    task_description="Order drinks using book_vehicle",
-                    tools=[book_vehicle],
-                    compensation_tool=cancel_vehicle_booking
-                )
-                # Agent 3: Turkey (Fails - capacity > 50)
-                a3 = CompensatableSagaAgent(
-                    name="Turkey Agent",
-                    backstory="Order turkey",
-                    task_description="Check turkey capacity using check_capacity",
-                    tools=[check_capacity],
-                    compensation_tool=None
-                )
-
-                # Dependencies: (A1, A2) -> A3
-                a3.add_dependency(a1)
-                a3.add_dependency(a2)
-
-                agents = [a1, a2, a3]
-            
-            elif "MONGODB-ACID" in task_definition.task_id:
-                # Agent 1: Create User (Succeeds)
-                a1 = CompensatableSagaAgent(
-                    name="User Creation Agent",
-                    backstory="Create a new user account in the database",
-                    task_description="Create user using create_user",
-                    tools=[create_user] if MONGODB_TOOLS_AVAILABLE else [],
-                    compensation_tool=delete_user if MONGODB_TOOLS_AVAILABLE else None
-                )
-                
-                # Agent 2: Update Profile (Succeeds)
-                a2 = CompensatableSagaAgent(
-                    name="Profile Update Agent",
-                    backstory="Update user profile information",
-                    task_description="Update profile using update_user_profile",
-                    tools=[update_user_profile] if MONGODB_TOOLS_AVAILABLE else [],
-                    compensation_tool=revert_user_profile if MONGODB_TOOLS_AVAILABLE else None
-                )
-                
-                # Agent 3: Add Preferences (Succeeds)
-                a3 = CompensatableSagaAgent(
-                    name="Preferences Agent",
-                    backstory="Add user preferences",
-                    task_description="Add preferences using add_user_preferences",
-                    tools=[add_user_preferences] if MONGODB_TOOLS_AVAILABLE else [],
-                    compensation_tool=remove_user_preferences if MONGODB_TOOLS_AVAILABLE else None
-                )
-                
-                # Agent 4: Create Session (Fails - user has 5 sessions already)
-                a4 = CompensatableSagaAgent(
-                    name="Session Agent",
-                    backstory="Create user session",
-                    task_description="Create session using create_user_session",
-                    tools=[create_user_session] if MONGODB_TOOLS_AVAILABLE else [],
-                    compensation_tool=delete_user_session if MONGODB_TOOLS_AVAILABLE else None
-                )
-                
-                # Define Dependencies: A1 -> A2 -> A3 -> A4
-                a2.add_dependency(a1)
-                a3.add_dependency(a2)
-                a4.add_dependency(a3)
-                
-                agents = [a1, a2, a3, a4]
-            
-            # Register and Run
             self.saga.transaction_manager(agents)
-            
-            # Track execution state
+
             execution_successful = False
             try:
-                # Add LangSmith tracing for SagaLLM execution
-                from langsmith import traceable
-                
-                @traceable(
-                    name=f"sagallm-{task_definition.task_id}",
-                    run_type="chain",
-                    tags=["sagallm", "multi-agent", task_definition.task_id, "mongodb-workflow"],
-                    metadata={
-                        "framework": "sagallm",
-                        "task_id": task_definition.task_id,
-                        "task_name": task_definition.name,
-                        "agent_count": len(agents),
-                        "agent_names": [a.name for a in agents],
-                        "workflow": "mongodb-user-profile"
-                    }
-                )
-                def run_saga_coordinator():
-                    # Run coordinator
-                    # SagaLLM catches exceptions and triggers rollback if with_rollback=True
-                    self.saga.saga_coordinator(with_rollback=True)
-                    return len(self.saga.context) == len(agents)
-                
-                # Run coordinator with tracing
-                execution_successful = run_saga_coordinator()
+                self.saga.saga_coordinator(with_rollback=True)
+                execution_successful = len(self.saga.context) == len(agents)
             except Exception as e:
-                # Saga coordinator should handle exceptions internally, but catch any unexpected ones
-                logger.warning(f"Saga coordinator raised exception: {e}")
+                logger.warning(f"Saga coordinator exception: {e}")
                 execution_successful = False
-            
+
             execution_time = time.time() - start_time
             self.execution_times.append(execution_time)
             self._record_memory_usage()
-            
-            # Aggregate LLM metrics from all agents
-            # SagaLLM makes one LLM call per agent
-            total_llm_calls = len(agents)
-            total_input_tokens = sum(getattr(agent, '_agent_tokens', {}).get("input", 0) for agent in agents)
-            total_output_tokens = sum(getattr(agent, '_agent_tokens', {}).get("output", 0) for agent in agents)
 
-            # Create base execution result
+            # Calculate metrics
+            total_goals = len(task_definition.goals)
+            achieved = len(self.saga.context) if execution_successful else 0
+            goal_satisfaction = achieved / total_goals if total_goals > 0 else 0
+
             exec_result = self._create_execution_result(
-                achieved_goals=[], # In ACID failure, 0 goals should be retained
-                satisfied_constraints=[],
+                achieved_goals=[g.goal_id for g in task_definition.goals[:achieved]],
+                satisfied_constraints=[c.constraint_id for c in task_definition.constraints],
                 schedule=[]
             )
 
-            # Add LLM usage metrics to resource_usage
             exec_result['resource_usage']['llm_metrics'] = {
-                "llm_call_count": total_llm_calls,
-                "total_input_tokens": total_input_tokens,
-                "total_output_tokens": total_output_tokens,
-                "total_tokens": total_input_tokens + total_output_tokens,
-            }
-            exec_result['resource_usage']['execution_time'] = execution_time
-
-            # Add compensation metrics
-            # SagaLLM triggers rollback when with_rollback=True and an agent fails
-            rollback_triggered = not execution_successful
-            exec_result['resource_usage']['compensation_metrics'] = {
-                "rollback_triggered": rollback_triggered,
-                "actions_compensated": len(agents) - 1 if rollback_triggered else 0,
-                "compensation_success": rollback_triggered,  # Rollback succeeds if triggered
-            }
-
-            return exec_result
-            
-        except Exception as e:
-            print(f"SagaLLM Execution Failed: {e}")
-            error_result = self._create_execution_result([], [], [])
-            error_result['resource_usage']['llm_metrics'] = {
-                "llm_call_count": 0,
+                "llm_call_count": len(agents),
                 "total_input_tokens": 0,
                 "total_output_tokens": 0,
                 "total_tokens": 0,
+                "note": f"SagaLLM makes {len(agents)} LLM calls (one per agent)"
             }
+            exec_result['resource_usage']['execution_time'] = execution_time
+            exec_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": not execution_successful,
+                "actions_compensated": len(agents) - 1 if not execution_successful else 0,
+                "compensation_success": not execution_successful,
+            }
+            exec_result['metrics'] = {
+                "goal_satisfaction_rate": goal_satisfaction,
+                "execution_time": execution_time,
+            }
+
+            return exec_result
+
+        except Exception as e:
+            logger.error(f"SagaLLM execution failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+            execution_time = time.time() - start_time
+            error_result = self._create_execution_result([], [], [])
+            error_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": 0,
+                "total_tokens": 0,
+            }
+            error_result['resource_usage']['execution_time'] = execution_time
             error_result['resource_usage']['compensation_metrics'] = {
                 "rollback_triggered": False,
                 "actions_compensated": 0,
@@ -586,4 +332,32 @@ class SagaLLMRunner(BaseFrameworkRunner):
             }
             return error_result
 
+    def _create_agents_for_task(self, task_id: str) -> List[CompensatableSagaAgent]:
+        """Create agents for a specific task."""
+        agent_configs = TASK_AGENTS.get(task_id, [])
+        tools = TASK_TOOLS.get(task_id, [])
 
+        agents = []
+        for i, config in enumerate(agent_configs):
+            # Find compensation tool for this agent
+            comp_tool = None
+            for tool in tools:
+                if tool.name in COMPENSATION_MAPPING.values():
+                    comp_tool = tool
+                    break
+
+            agent = CompensatableSagaAgent(
+                name=config["name"],
+                backstory=f"You are the {config['name']} for {task_id}",
+                task_description=config["task"],
+                tools=tools,
+                compensation_tool=comp_tool
+            )
+
+            # Add dependencies (sequential)
+            if i > 0:
+                agent.add_dependency(agents[i-1])
+
+            agents.append(agent)
+
+        return agents

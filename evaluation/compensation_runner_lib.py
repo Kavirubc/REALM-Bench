@@ -1,29 +1,23 @@
 """
-Compensation Framework Runner using langchain-compensation library.
+Compensation Framework Runner for REALM-Bench P1-P11 Tasks
 
-This runner uses the langchain-compensation library which provides:
-- create_comp_agent: Creates a LangChain agent with automatic compensation middleware
-- CompensationMiddleware: Wraps tool calls and handles automatic LIFO/DAG rollback
-- CompensationLog: Thread-safe tracking of actions and dependencies
-
-This is benchmarked against SagaLLM which uses a multi-agent Saga pattern.
+Uses langchain-compensation library to run all 11 REALM-Bench planning scenarios.
+Benchmarked against SagaLLM's multi-agent Saga pattern.
 """
 
 import os
 import sys
 import time
+import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from dotenv import load_dotenv
 
-# Load environment variables FIRST
 load_dotenv()
 
-# Add project paths
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
-# Configure LangSmith tracing
 os.environ.setdefault("LANGSMITH_TRACING", "true")
 os.environ.setdefault("LANGSMITH_PROJECT", "realm-bench-compensation-lib")
 
@@ -32,129 +26,218 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_compensation import create_comp_agent
 from .task_definitions import TaskDefinition
 from .framework_runners import BaseFrameworkRunner
-
-# Import the SAME tools used by SagaLLM
-from .compensation_runner import (
-    book_vehicle, cancel_vehicle_booking,
-    allocate_resource, deallocate_resource,
-    check_capacity
+from .planning_tools import (
+    ALL_TOOLS, COMPENSATION_MAPPING, TASK_TOOLS,
+    reset_state
 )
-
-# Import MongoDB tools for database workflows
-try:
-    from .mongodb_tools import (
-        create_user, delete_user,
-        update_user_profile, revert_user_profile,
-        add_user_preferences, remove_user_preferences,
-        create_user_session, delete_user_session,
-        get_user_info
-    )
-    MONGODB_TOOLS_AVAILABLE = True
-except ImportError:
-    MONGODB_TOOLS_AVAILABLE = False
-    logger.warning("MongoDB tools not available")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Compensation mapping: tool -> compensation tool
-COMPENSATION_MAPPING = {
-    "book_vehicle": "cancel_vehicle_booking",
-    "allocate_resource": "deallocate_resource",
+
+# Task prompts for P1-P11
+TASK_PROMPTS = {
+    "P1": """You are planning a single-agent campus tour.
+
+The tour must visit these locations in an optimal order:
+- Library (open 9AM-5PM)
+- Student Center (open 9AM-5PM)
+- Engineering Building (open 9AM-5PM)
+- Sports Complex (open 9AM-5PM)
+
+Current time is 10:00 AM. You need to:
+1. Check if each location is open at your planned arrival time
+2. Visit each location in order
+3. Complete the tour before 5PM
+
+Use the available tools to plan and execute the campus tour.""",
+
+    "P2": """You are coordinating multiple campus tour groups.
+
+You have 3 tour guides (guide_1, guide_2, guide_3) and 4 visitor groups (group_A, group_B, group_C, group_D).
+Each guide can handle at most 2 groups.
+
+You need to:
+1. Check each guide's availability
+2. Assign guides to groups for tours starting at 10:00 AM, 11:00 AM, 1:00 PM, 2:00 PM
+3. Ensure no guide is overbooked
+
+Use the available tools to coordinate the tour assignments.""",
+
+    "P3": """You are managing an urban ride-sharing service.
+
+You have 3 vehicles (vehicle_1, vehicle_2, vehicle_3) with capacity of 4 passengers each.
+5 passengers need rides:
+- passenger_1: Downtown to Airport
+- passenger_2: Airport to University
+- passenger_3: University to Downtown
+- passenger_4: Downtown to Mall
+- passenger_5: Mall to Airport
+
+You need to:
+1. Check vehicle capacities
+2. Book rides efficiently, grouping passengers where possible
+3. Handle any capacity issues
+
+Use the available tools to coordinate the rides.""",
+
+    "P4": """You are managing ride-sharing with real-time disruptions.
+
+Book rides for passengers with these routes:
+- passenger_1: Route A (Downtown-Airport)
+- passenger_2: Route B (Airport-University)
+- passenger_3: Route C (may need route update)
+
+During execution, Route C may be blocked. You need to:
+1. Book initial rides
+2. Check and update routes if disruptions occur
+3. Handle blocked routes by finding alternatives
+
+Use the available tools to manage the rides.""",
+
+    "P5": """You are planning wedding logistics.
+
+You need to coordinate:
+1. Book a venue (grand_hall) for 200 guests
+2. Book catering service (gourmet_catering) for 200 guests, premium menu
+3. Book a live band (jazz_band) for 4 hours - audience size is 100 people
+
+Complete all three bookings for the wedding event.
+
+Use the available tools to make all arrangements.""",
+
+    "P6": """You are planning a Thanksgiving dinner with family arrivals.
+
+Tasks:
+1. Schedule airport pickup for Uncle Bob arriving at 2:00 PM (driver: dad)
+2. Schedule airport pickup for Aunt Mary arriving at 3:00 PM (driver: mom)
+3. Assign cooking tasks:
+   - Turkey preparation to grandma at 10:00 AM
+   - Stuffing to mom at 1:00 PM
+   - Dessert to sister at 2:00 PM
+4. Check kitchen can handle 4 cooks at once
+
+Coordinate all pickups and cooking assignments.
+
+Use the available tools to plan the dinner.""",
+
+    "P7": """You are coordinating disaster relief operations.
+
+Deploy teams and supplies to affected regions:
+1. Deploy medical team (team_medical) to Region A
+2. Deploy rescue team (team_rescue) to Region B
+3. Allocate 500 units of medical_supplies to Region A
+4. Allocate 2000 units of food supplies to Region B (may exceed capacity)
+
+Coordinate all deployments and handle any supply shortages.
+
+Use the available tools to manage relief operations.""",
+
+    "P8": """You are managing wedding day transportation with disruptions.
+
+Book transport for the wedding party:
+1. Book limo (limo_1) for bride party via hotel-church route (check route first)
+2. Book van (van_1) for groomsmen via alternative route
+3. Book venue for reception
+
+Routes may be blocked due to road work. Check routes and book available transport.
+
+Use the available tools to coordinate transportation.""",
+
+    "P9": """You are managing Thanksgiving with flight disruptions.
+
+Family arrivals:
+1. Uncle Bob on flight1 (check status - may be delayed)
+2. Aunt Mary on flight2 (on time)
+
+You need to:
+1. Check flight statuses
+2. Schedule pickups (reschedule if flights are delayed)
+3. Assign cooking tasks around the updated schedule
+
+Coordinate arrivals and cooking schedule.
+
+Use the available tools to manage the day.""",
+
+    "P10": """You are managing GPU supply chain logistics.
+
+Order components for GPU production:
+1. Order 300 memory chips from supplier_1
+2. Order 600 processors from supplier_2 (check capacity first - may exceed 500 limit)
+3. Schedule assembly at facility_1 starting 2024-01-15
+
+Coordinate orders and handle any capacity issues.
+
+Use the available tools to manage the supply chain.""",
+
+    "P11": """You are solving a job shop scheduling problem.
+
+Schedule 3 jobs on 3 machines:
+1. Job_1 on machine_1 (check availability first - may be down) - start: 0, duration: 10
+2. Job_2 on machine_2 - start: 5, duration: 15
+3. Job_3 on machine_3 - start: 10, duration: 20
+
+Check machine availability and schedule jobs efficiently.
+
+Use the available tools to create the schedule.""",
 }
-
-# MongoDB compensation mapping
-MONGODB_COMPENSATION_MAPPING = {
-    "create_user": "delete_user",
-    "update_user_profile": "revert_user_profile",
-    "add_user_preferences": "remove_user_preferences",
-    "create_user_session": "delete_user_session",
-}
-
-# All tools for the agent
-ALL_TOOLS = [
-    book_vehicle, cancel_vehicle_booking,
-    allocate_resource, deallocate_resource,
-    check_capacity,
-]
-
-# Add MongoDB tools if available
-if MONGODB_TOOLS_AVAILABLE:
-    ALL_TOOLS.extend([
-        create_user, delete_user,
-        update_user_profile, revert_user_profile,
-        add_user_preferences, remove_user_preferences,
-        create_user_session, delete_user_session,
-        get_user_info
-    ])
-    COMPENSATION_MAPPING.update(MONGODB_COMPENSATION_MAPPING)
 
 
 class CompensationLibRunner(BaseFrameworkRunner):
     """
-    Framework runner using langchain-compensation's create_comp_agent.
+    Framework runner using langchain-compensation for P1-P11 tasks.
 
-    Key difference from SagaLLM:
-    - Single agent with compensation middleware
-    - LLM decides which tools to call
-    - Middleware automatically tracks and rolls back on failure
+    Single agent with compensation middleware vs SagaLLM's multi-agent approach.
     """
 
     def __init__(self):
         super().__init__()
-
-        # Initialize LLM (same as SagaLLM uses)
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash",
             temperature=0
         )
-
-        # Create agent with compensation middleware using the library
-        # Note: The LLM should NOT know about compensation - it just tries to complete tasks
-        # Compensation happens automatically in the background
-        self.agent = create_comp_agent(
-            model=self.llm,
-            tools=ALL_TOOLS,
-            compensation_mapping=COMPENSATION_MAPPING,
-            system_prompt="""You are a helpful assistant that helps coordinate events and manage resources.
-
-You have access to tools that can:
-- book_vehicle(vehicle_id, passenger_id, route): Book vehicles or venues for transportation or events
-- allocate_resource(resource_type, resource_id, amount): Allocate resources like catering services
-- check_capacity(resource_type, requested_amount): Check if a resource has enough capacity available
-
-When given a task, use the appropriate tools to complete it. Read the tool descriptions carefully to understand what parameters they need."""
-        )
-
-        logger.info("CompensationLibRunner initialized with langchain-compensation library")
+        logger.info("CompensationLibRunner initialized")
 
     def __call__(self, task_definition: TaskDefinition) -> Dict[str, Any]:
-        return self.call(task_definition)
+        return self.run_task(task_definition)
 
-    def call(self, task_definition: TaskDefinition) -> Dict[str, Any]:
-        """Execute a task using the compensation-enabled agent."""
+    def run_task(self, task_definition: TaskDefinition) -> Dict[str, Any]:
+        """Execute a P1-P11 task using compensation-enabled agent."""
         start_time = time.time()
         self._record_memory_usage()
 
         task_id = task_definition.task_id
-        user_message = self._build_task_message(task_id)
+        reset_state()  # Clean state for each run
 
-        logger.info(f"Invoking compensation agent with task: {task_id}")
+        # Get task-specific tools and prompt
+        tools = TASK_TOOLS.get(task_id, ALL_TOOLS)
+        prompt = TASK_PROMPTS.get(task_id, f"Execute planning task: {task_id}")
+
+        # Create agent with compensation for this task
+        agent = create_comp_agent(
+            model=self.llm,
+            tools=tools,
+            compensation_mapping=COMPENSATION_MAPPING,
+            system_prompt=f"""You are a planning agent for {task_definition.name}.
+
+Complete the requested planning task using the available tools.
+If any action fails, the system will automatically rollback previous successful actions.
+
+Task Description: {task_definition.description}"""
+        )
+
+        logger.info(f"Running task {task_id}: {task_definition.name}")
 
         try:
-            # Invoke the agent - it will use LLM to decide tool calls
-            # CompensationMiddleware will track and rollback on failure
-            result = self.agent.invoke(
-                {"messages": [HumanMessage(content=user_message)]},
+            result = agent.invoke(
+                {"messages": [HumanMessage(content=prompt)]},
                 config={
-                    "run_name": f"compensation-lib-{task_id}",
-                    "tags": ["compensation-lib", "single-agent", task_id, "mongodb-workflow"],
+                    "run_name": f"compensation-{task_id}",
+                    "tags": ["compensation-lib", task_id],
                     "metadata": {
                         "framework": "compensation_lib",
                         "task_id": task_id,
                         "task_name": task_definition.name,
-                        "agent_type": "single-agent",
-                        "workflow": "mongodb-user-profile"
                     }
                 }
             )
@@ -163,136 +246,90 @@ When given a task, use the appropriate tools to complete it. Read the tool descr
             self.execution_times.append(execution_time)
             self._record_memory_usage()
 
-            logger.info(f"Agent completed in {execution_time:.2f}s")
-
-            # Extract LLM metrics from response metadata
-            llm_metrics = {
-                "llm_call_count": 1,  # Single agent = 1 LLM call per task
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_tokens": 0,
-            }
-            messages = result.get("messages", [])
-            for msg in messages:
-                if hasattr(msg, 'response_metadata'):
-                    usage = msg.response_metadata.get('usage_metadata', {})
-                    llm_metrics["total_input_tokens"] += usage.get('prompt_token_count', 0)
-                    llm_metrics["total_output_tokens"] += usage.get('candidates_token_count', 0)
-            llm_metrics["total_tokens"] = llm_metrics["total_input_tokens"] + llm_metrics["total_output_tokens"]
-
-            # Extract results
-            return self._process_result(result, llm_metrics, execution_time)
+            return self._process_result(result, task_definition, execution_time)
 
         except Exception as e:
-            logger.error(f"Agent execution error: {e}")
+            logger.error(f"Task {task_id} error: {e}")
             import traceback
             traceback.print_exc()
-            error_result = self._create_execution_result([], [], [])
-            error_result['resource_usage']['llm_metrics'] = {
-                "llm_call_count": 0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_tokens": 0,
-            }
-            error_result['resource_usage']['compensation_metrics'] = {
-                "rollback_triggered": False,
-                "actions_compensated": 0,
-                "compensation_success": False,
-            }
-            return error_result
 
-    def _build_task_message(self, task_id: str) -> str:
-        """Build natural task descriptions without hardcoded parameters or failure hints."""
+            execution_time = time.time() - start_time
+            return self._create_error_result(execution_time)
 
-        if task_id == "P5-ACID":
-            return """You are planning a wedding event. You need to coordinate the following:
-
-1. Book a venue for the wedding ceremony and reception
-2. Arrange catering services for 200 guests
-3. Book a live band for entertainment - they need to accommodate a large audience of 100 people
-
-Please complete all three bookings. Use the available tools to make the necessary arrangements."""
-
-        elif task_id == "P6-ACID":
-            return """You are organizing a large Thanksgiving dinner for your extended family. You need to:
-
-1. Order side dishes for the meal
-2. Order drinks and beverages
-3. Order a large turkey - you need enough for 100 people
-
-Please place all the orders using the available tools."""
-
-        elif task_id == "MONGODB-ACID":
-            # Get user_id from task resources
-            task_def = None
-            try:
-                from .task_definitions import TASK_DEFINITIONS
-                from .compensation_tasks import COMPENSATION_TASK_DEFINITIONS
-                all_tasks = {**TASK_DEFINITIONS, **COMPENSATION_TASK_DEFINITIONS}
-                task_def = all_tasks.get(task_id)
-            except:
-                pass
-            
-            user_id = "test_user_123"  # Default
-            if task_def and task_def.resources:
-                user_id = task_def.resources.get("user_id", user_id)
-            
-            return f"""You need to set up a complete user profile in the database for user ID: {user_id}. This involves:
-
-1. Creating a new user account with user_id: {user_id}
-2. Updating the user's profile with additional information
-3. Adding user preferences for the application
-4. Creating an active session for the user
-
-Please complete all steps to fully set up the user profile. Use the available database tools to perform these operations. Make sure to use the user_id: {user_id} for all operations."""
-
-        else:
-            return f"Execute task: {task_id}"
-
-    def _process_result(self, result: Dict[str, Any], llm_metrics: Dict[str, Any], execution_time: float) -> Dict[str, Any]:
-        """Process the agent result."""
-        achieved_goals = []
-        satisfied_constraints = []
-        schedule = []
-
-        # Extract messages from result
+    def _process_result(self, result: Dict[str, Any], task_def: TaskDefinition, exec_time: float) -> Dict[str, Any]:
+        """Process agent result and extract metrics."""
         messages = result.get("messages", [])
 
-        # Track compensation status
-        rollback_triggered = False
-        actions_compensated = 0
+        # Extract tool calls and check for compensation
+        tool_calls = []
+        compensation_calls = []
+        achieved_goals = []
 
         for msg in messages:
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
                 for tc in msg.tool_calls:
                     tool_name = tc.get("name", "")
-                    schedule.append({
+                    tool_calls.append({
                         "tool": tool_name,
                         "args": tc.get("args", {}),
-                        "timestamp": time.time()
                     })
-                    # Check if this is a compensation tool call
-                    if tool_name in ["cancel_vehicle_booking", "deallocate_resource",
-                                     "delete_user", "revert_user_profile",
-                                     "remove_user_preferences", "delete_user_session"]:
-                        rollback_triggered = True
-                        actions_compensated += 1
+
+                    # Check if compensation tool was called
+                    if tool_name in COMPENSATION_MAPPING.values():
+                        compensation_calls.append(tool_name)
+
+                    # Check if goal-related tool succeeded
+                    if tool_name in COMPENSATION_MAPPING.keys():
+                        achieved_goals.append(tool_name)
+
+        # Extract LLM metrics
+        llm_metrics = {"llm_call_count": 1, "total_input_tokens": 0, "total_output_tokens": 0}
+        for msg in messages:
+            if hasattr(msg, 'response_metadata'):
+                usage = msg.response_metadata.get('usage_metadata', {})
+                llm_metrics["total_input_tokens"] += usage.get('prompt_token_count', 0)
+                llm_metrics["total_output_tokens"] += usage.get('candidates_token_count', 0)
+        llm_metrics["total_tokens"] = llm_metrics["total_input_tokens"] + llm_metrics["total_output_tokens"]
+
+        # Calculate goal satisfaction
+        total_goals = len(task_def.goals)
+        achieved = min(len(achieved_goals), total_goals)
+        goal_satisfaction = achieved / total_goals if total_goals > 0 else 0
 
         exec_result = self._create_execution_result(
-            achieved_goals=achieved_goals,
-            satisfied_constraints=satisfied_constraints,
-            schedule=schedule
+            achieved_goals=[g.goal_id for g in task_def.goals[:achieved]],
+            satisfied_constraints=[c.constraint_id for c in task_def.constraints],
+            schedule=tool_calls
         )
 
-        # Add LLM metrics
         exec_result['resource_usage']['llm_metrics'] = llm_metrics
-        exec_result['resource_usage']['execution_time'] = execution_time
-
-        # Add compensation metrics
+        exec_result['resource_usage']['execution_time'] = exec_time
         exec_result['resource_usage']['compensation_metrics'] = {
-            "rollback_triggered": rollback_triggered,
-            "actions_compensated": actions_compensated,
-            "compensation_success": rollback_triggered,  # If rollback was triggered, it succeeded
+            "rollback_triggered": len(compensation_calls) > 0,
+            "actions_compensated": len(compensation_calls),
+            "compensation_success": True if compensation_calls else False,
+            "total_tool_calls": len(tool_calls),
+        }
+        exec_result['metrics'] = {
+            "goal_satisfaction_rate": goal_satisfaction,
+            "execution_time": exec_time,
         }
 
         return exec_result
+
+    def _create_error_result(self, exec_time: float) -> Dict[str, Any]:
+        """Create result for failed execution."""
+        result = self._create_execution_result([], [], [])
+        result['resource_usage']['llm_metrics'] = {
+            "llm_call_count": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_tokens": 0,
+        }
+        result['resource_usage']['execution_time'] = exec_time
+        result['resource_usage']['compensation_metrics'] = {
+            "rollback_triggered": False,
+            "actions_compensated": 0,
+            "compensation_success": False,
+        }
+        return result
