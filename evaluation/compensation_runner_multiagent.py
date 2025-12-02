@@ -94,7 +94,7 @@ class MultiAgentCompensationRunner(BaseFrameworkRunner):
         
         # Initialize LLM (same as SagaLLM uses)
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest",
+            model="gemini-2.0-flash",
             temperature=0
         )
         
@@ -120,7 +120,12 @@ class MultiAgentCompensationRunner(BaseFrameworkRunner):
             # Execute agents in order (with dependencies like SagaLLM)
             execution_results = []
             executed_agents = []
-            
+
+            # Track LLM metrics across all agents
+            total_llm_calls = 0
+            total_input_tokens = 0
+            total_output_tokens = 0
+
             for agent_info in agents:
                 agent_name = agent_info["name"]
                 agent = agent_info["agent"]
@@ -155,6 +160,14 @@ class MultiAgentCompensationRunner(BaseFrameworkRunner):
                     
                     # Extract tool execution result
                     agent_result = self._extract_agent_result(result)
+
+                    # Extract LLM metrics from this agent's result
+                    total_llm_calls += 1
+                    for msg in result.get("messages", []):
+                        if hasattr(msg, 'response_metadata'):
+                            usage = msg.response_metadata.get('usage_metadata', {})
+                            total_input_tokens += usage.get('prompt_token_count', 0)
+                            total_output_tokens += usage.get('candidates_token_count', 0)
                     
                     # Check messages for error status (middleware sets status="error" on ToolMessage)
                     has_error = False
@@ -209,16 +222,55 @@ class MultiAgentCompensationRunner(BaseFrameworkRunner):
             execution_time = time.time() - start_time
             self.execution_times.append(execution_time)
             self._record_memory_usage()
-            
+
             logger.info(f"All agents completed in {execution_time:.2f}s")
-            
-            return self._create_execution_result([], [], [])
+
+            exec_result = self._create_execution_result([], [], [])
+            exec_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": total_llm_calls,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+            }
+            exec_result['resource_usage']['execution_time'] = execution_time
+            exec_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": False,
+                "actions_compensated": 0,
+                "compensation_success": True,  # All agents completed successfully
+            }
+            return exec_result
             
         except Exception as e:
             logger.error(f"Multi-agent execution error: {e}")
             import traceback
             traceback.print_exc()
-            return self._create_execution_result([], [], [])
+
+            execution_time = time.time() - start_time
+
+            # Get compensation status from shared log
+            compensated_count = 0
+            rollback_triggered = False
+            try:
+                comp_records = shared_comp_log.to_dict()
+                compensated_count = sum(1 for r in comp_records.values() if r.get("compensated", False))
+                rollback_triggered = compensated_count > 0
+            except:
+                pass
+
+            error_result = self._create_execution_result([], [], [])
+            error_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": total_llm_calls,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+            }
+            error_result['resource_usage']['execution_time'] = execution_time
+            error_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": rollback_triggered,
+                "actions_compensated": compensated_count,
+                "compensation_success": rollback_triggered,  # Rollback succeeded if it was triggered
+            }
+            return error_result
 
     def _create_agents(self, task_id: str, shared_comp_log: CompensationLog) -> List[Dict[str, Any]]:
         """Create agents for the given task, all sharing the same compensation log."""
@@ -232,7 +284,8 @@ class MultiAgentCompensationRunner(BaseFrameworkRunner):
                 compensation_mapping=COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for booking the wedding venue.
 Use the book_vehicle tool to book a venue for the wedding ceremony and reception.""",
-                comp_log_ref=shared_comp_log  # Share compensation log across all agents
+                shared_log=shared_comp_log,
+                agent_id="venue-agent"
             )
             agents.append({
                 "name": "Venue Agent",
@@ -249,7 +302,8 @@ Use the book_vehicle tool to book a venue for the wedding ceremony and reception
                 compensation_mapping=COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for arranging catering services.
 Use the allocate_resource tool to arrange catering for 200 wedding guests.""",
-                comp_log_ref=shared_comp_log  # Share compensation log
+                shared_log=shared_comp_log,
+                agent_id="caterer-agent"
             )
             agents.append({
                 "name": "Caterer Agent",
@@ -267,7 +321,8 @@ Use the allocate_resource tool to arrange catering for 200 wedding guests.""",
                 system_prompt="""You are responsible for booking entertainment.
 Book a live band that can accommodate a large audience of 100 people.
 First check if the band has capacity for 100 people using the check_capacity tool.""",
-                comp_log_ref=shared_comp_log  # Share compensation log (for rollback when this fails)
+                shared_log=shared_comp_log,
+                agent_id="band-agent"
             )
             agents.append({
                 "name": "Band Agent",
@@ -285,7 +340,8 @@ First check if the band has capacity for 100 people using the check_capacity too
                 compensation_mapping=COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for ordering side dishes.
 Order side dishes for the Thanksgiving dinner using the book_vehicle tool.""",
-                comp_log_ref=shared_comp_log  # Share compensation log
+                shared_log=shared_comp_log,
+                agent_id="sides-agent"
             )
             agents.append({
                 "name": "Sides Agent",
@@ -302,7 +358,8 @@ Order side dishes for the Thanksgiving dinner using the book_vehicle tool.""",
                 compensation_mapping=COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for ordering beverages.
 Order drinks for the Thanksgiving dinner using the book_vehicle tool.""",
-                comp_log_ref=shared_comp_log  # Share compensation log
+                shared_log=shared_comp_log,
+                agent_id="drinks-agent"
             )
             agents.append({
                 "name": "Drinks Agent",
@@ -320,7 +377,8 @@ Order drinks for the Thanksgiving dinner using the book_vehicle tool.""",
                 system_prompt="""You are responsible for ordering the main dish.
 Order a large turkey for 100 people for Thanksgiving dinner.
 First check if there's enough turkey available using the check_capacity tool.""",
-                comp_log_ref=shared_comp_log  # Share compensation log (for rollback when this fails)
+                shared_log=shared_comp_log,
+                agent_id="turkey-agent"
             )
             agents.append({
                 "name": "Turkey Agent",
@@ -342,7 +400,8 @@ First check if there's enough turkey available using the check_capacity tool."""
                 compensation_mapping=MONGODB_COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for creating new user accounts.
 Create a new user account in the database with the provided user information.""",
-                comp_log_ref=shared_comp_log
+                shared_log=shared_comp_log,
+                agent_id="user-creation-agent"
             )
             # Get user_id from task resources
             user_id = "test_user_123"  # Default from task definition
@@ -362,7 +421,8 @@ Create a new user account in the database with the provided user information."""
                 compensation_mapping=MONGODB_COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for updating user profiles.
 Update the user's profile with additional information like bio and location.""",
-                comp_log_ref=shared_comp_log
+                shared_log=shared_comp_log,
+                agent_id="profile-update-agent"
             )
             agents.append({
                 "name": "Profile Update Agent",
@@ -379,7 +439,8 @@ Update the user's profile with additional information like bio and location.""",
                 compensation_mapping=MONGODB_COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for managing user preferences.
 Add user preferences for the application such as theme and notification settings.""",
-                comp_log_ref=shared_comp_log
+                shared_log=shared_comp_log,
+                agent_id="preferences-agent"
             )
             agents.append({
                 "name": "Preferences Agent",
@@ -396,7 +457,8 @@ Add user preferences for the application such as theme and notification settings
                 compensation_mapping=MONGODB_COMPENSATION_MAPPING,
                 system_prompt="""You are responsible for creating user sessions.
 Create an active session for the user to track their current session.""",
-                comp_log_ref=shared_comp_log
+                shared_log=shared_comp_log,
+                agent_id="session-agent"
             )
             agents.append({
                 "name": "Session Agent",

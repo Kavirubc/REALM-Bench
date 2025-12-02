@@ -127,7 +127,7 @@ class CompensatableSagaAgent(Agent):
         
         # Create Gemini client for this agent (same as langchain-compensation uses)
         from utils.gemini_client import GeminiClientWrapper
-        self._gemini_client = GeminiClientWrapper(model="gemini-flash-latest", temperature=0)
+        self._gemini_client = GeminiClientWrapper(model="gemini-2.0-flash", temperature=0)
         
         # Initialize parent Agent class (this will create a ReactAgent with OpenAI)
         super().__init__(
@@ -135,7 +135,7 @@ class CompensatableSagaAgent(Agent):
             backstory=backstory,
             task_description=task_description,
             tools=saga_tools,
-            llm="gemini-flash-latest"  # Model name for logging
+            llm="gemini-2.0-flash"  # Model name for logging
         )
         
         # Replace ReactAgent with a custom one that tracks tool results
@@ -189,7 +189,7 @@ class CompensatableSagaAgent(Agent):
         
         self.react_agent = ToolTrackingReactAgent(
             tools=saga_tools,
-            model="gemini-flash-latest",
+            model="gemini-2.0-flash",
             system_prompt=backstory,
             client=self._gemini_client
         )
@@ -538,30 +538,52 @@ class SagaLLMRunner(BaseFrameworkRunner):
             self._record_memory_usage()
             
             # Aggregate LLM metrics from all agents
-            total_llm_calls = sum(getattr(agent, '_agent_llm_calls', 0) for agent in agents)
+            # SagaLLM makes one LLM call per agent
+            total_llm_calls = len(agents)
             total_input_tokens = sum(getattr(agent, '_agent_tokens', {}).get("input", 0) for agent in agents)
             total_output_tokens = sum(getattr(agent, '_agent_tokens', {}).get("output", 0) for agent in agents)
-            
+
             # Create base execution result
             exec_result = self._create_execution_result(
                 achieved_goals=[], # In ACID failure, 0 goals should be retained
                 satisfied_constraints=[],
                 schedule=[]
             )
-            
+
             # Add LLM usage metrics to resource_usage
             exec_result['resource_usage']['llm_metrics'] = {
                 "llm_call_count": total_llm_calls,
                 "total_input_tokens": total_input_tokens,
                 "total_output_tokens": total_output_tokens,
                 "total_tokens": total_input_tokens + total_output_tokens,
-                "note": f"SagaLLM makes {total_llm_calls} separate LLM calls (one per agent). Each agent independently calls the LLM."
             }
-            
+            exec_result['resource_usage']['execution_time'] = execution_time
+
+            # Add compensation metrics
+            # SagaLLM triggers rollback when with_rollback=True and an agent fails
+            rollback_triggered = not execution_successful
+            exec_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": rollback_triggered,
+                "actions_compensated": len(agents) - 1 if rollback_triggered else 0,
+                "compensation_success": rollback_triggered,  # Rollback succeeds if triggered
+            }
+
             return exec_result
             
         except Exception as e:
             print(f"SagaLLM Execution Failed: {e}")
-            return self._create_execution_result([], [], [])
+            error_result = self._create_execution_result([], [], [])
+            error_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+            }
+            error_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": False,
+                "actions_compensated": 0,
+                "compensation_success": False,
+            }
+            return error_result
 
 

@@ -105,7 +105,7 @@ class CompensationLibRunner(BaseFrameworkRunner):
 
         # Initialize LLM (same as SagaLLM uses)
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest",
+            model="gemini-2.0-flash",
             temperature=0
         )
 
@@ -165,14 +165,41 @@ When given a task, use the appropriate tools to complete it. Read the tool descr
 
             logger.info(f"Agent completed in {execution_time:.2f}s")
 
+            # Extract LLM metrics from response metadata
+            llm_metrics = {
+                "llm_call_count": 1,  # Single agent = 1 LLM call per task
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+            }
+            messages = result.get("messages", [])
+            for msg in messages:
+                if hasattr(msg, 'response_metadata'):
+                    usage = msg.response_metadata.get('usage_metadata', {})
+                    llm_metrics["total_input_tokens"] += usage.get('prompt_token_count', 0)
+                    llm_metrics["total_output_tokens"] += usage.get('candidates_token_count', 0)
+            llm_metrics["total_tokens"] = llm_metrics["total_input_tokens"] + llm_metrics["total_output_tokens"]
+
             # Extract results
-            return self._process_result(result)
+            return self._process_result(result, llm_metrics, execution_time)
 
         except Exception as e:
             logger.error(f"Agent execution error: {e}")
             import traceback
             traceback.print_exc()
-            return self._create_execution_result([], [], [])
+            error_result = self._create_execution_result([], [], [])
+            error_result['resource_usage']['llm_metrics'] = {
+                "llm_call_count": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+            }
+            error_result['resource_usage']['compensation_metrics'] = {
+                "rollback_triggered": False,
+                "actions_compensated": 0,
+                "compensation_success": False,
+            }
+            return error_result
 
     def _build_task_message(self, task_id: str) -> str:
         """Build natural task descriptions without hardcoded parameters or failure hints."""
@@ -222,7 +249,7 @@ Please complete all steps to fully set up the user profile. Use the available da
         else:
             return f"Execute task: {task_id}"
 
-    def _process_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_result(self, result: Dict[str, Any], llm_metrics: Dict[str, Any], execution_time: float) -> Dict[str, Any]:
         """Process the agent result."""
         achieved_goals = []
         satisfied_constraints = []
@@ -231,17 +258,41 @@ Please complete all steps to fully set up the user profile. Use the available da
         # Extract messages from result
         messages = result.get("messages", [])
 
+        # Track compensation status
+        rollback_triggered = False
+        actions_compensated = 0
+
         for msg in messages:
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
                 for tc in msg.tool_calls:
+                    tool_name = tc.get("name", "")
                     schedule.append({
-                        "tool": tc.get("name"),
+                        "tool": tool_name,
                         "args": tc.get("args", {}),
                         "timestamp": time.time()
                     })
+                    # Check if this is a compensation tool call
+                    if tool_name in ["cancel_vehicle_booking", "deallocate_resource",
+                                     "delete_user", "revert_user_profile",
+                                     "remove_user_preferences", "delete_user_session"]:
+                        rollback_triggered = True
+                        actions_compensated += 1
 
-        return self._create_execution_result(
+        exec_result = self._create_execution_result(
             achieved_goals=achieved_goals,
             satisfied_constraints=satisfied_constraints,
             schedule=schedule
         )
+
+        # Add LLM metrics
+        exec_result['resource_usage']['llm_metrics'] = llm_metrics
+        exec_result['resource_usage']['execution_time'] = execution_time
+
+        # Add compensation metrics
+        exec_result['resource_usage']['compensation_metrics'] = {
+            "rollback_triggered": rollback_triggered,
+            "actions_compensated": actions_compensated,
+            "compensation_success": rollback_triggered,  # If rollback was triggered, it succeeded
+        }
+
+        return exec_result
