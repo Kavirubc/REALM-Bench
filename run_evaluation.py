@@ -37,6 +37,11 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+# Suppress noisy third-party loggers
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 from evaluation.evaluator import BenchmarkEvaluator, EvaluationConfig
 from evaluation.framework_runners import get_framework_runners, create_mock_runner, LangGraphRunnerV2, LangChainCompensationRunner
 from evaluation.task_definitions import TASK_DEFINITIONS

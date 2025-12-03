@@ -1,0 +1,37 @@
+[
+  {
+    "task_id": "P11",
+    "framework": "langgraph",
+    "execution_time": 72.99582624435425,
+    "achieved_goals": [
+      "minimize_makespan"
+    ],
+    "satisfied_constraints": [
+      "job_precedence"
+    ],
+    "resource_usage": {
+      "memory_usage": [
+        {
+          "memory_mb": 149.421875,
+          "timestamp": 1764750870.13584
+        },
+        {
+          "memory_mb": 203.921875,
+          "timestamp": 1764750943.130829
+        }
+      ],
+      "execution_times": [
+        72.99494504928589
+      ],
+      "token_usage": {}
+    },
+    "metrics": {
+      "goal_satisfaction_rate": 33.33333333333333,
+      "makespan": 19.0,
+      "constraint_satisfaction_rate": 0.0,
+      "memory_usage": 203.921875,
+      "execution_time": 72.99494504928589,
+      "token_usage": 0.0
+    }
+  }
+]
