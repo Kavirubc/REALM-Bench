@@ -22,14 +22,23 @@ Options:
 import argparse
 import sys
 import os
+import logging
 from typing import List, Dict
 
 # Add project paths
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(project_root)
 
+# Set up console logging early
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
 from evaluation.evaluator import BenchmarkEvaluator, EvaluationConfig
-from evaluation.framework_runners import get_framework_runners, create_mock_runner
+from evaluation.framework_runners import get_framework_runners, create_mock_runner, LangGraphRunnerV2, LangChainCompensationRunner
 from evaluation.task_definitions import TASK_DEFINITIONS
 
 
@@ -107,7 +116,14 @@ Examples:
         action='store_true',
         help='Enable verbose output'
     )
-    
+
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='gemini-2.0-flash',
+        help='LLM model to use (default: gemini-2.0-flash)'
+    )
+
     return parser.parse_args()
 
 
@@ -157,8 +173,14 @@ def print_evaluation_info(config: EvaluationConfig, available_frameworks: List[s
 def main():
     """Main evaluation function"""
     args = parse_arguments()
-    
-    print("🚀 Starting REALM-Bench Evaluation")
+
+    # Set logging level based on verbose flag
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("realm_bench").setLevel(logging.DEBUG)
+        print("Verbose logging enabled")
+
+    print("Starting REALM-Bench Evaluation")
     print("=" * 60)
     
     # Get available frameworks
@@ -170,7 +192,13 @@ def main():
             for framework in available_frameworks
         }
     else:
-        framework_runners = get_framework_runners()
+        # Use V2 runners with specified model for fair comparison
+        model = args.model
+        print(f"Using model: {model}")
+        framework_runners = {
+            'langgraph': LangGraphRunnerV2(model=model),
+            'langchain_compensation': LangChainCompensationRunner(model=model),
+        }
         available_frameworks = list(framework_runners.keys())
     
     if not available_frameworks:

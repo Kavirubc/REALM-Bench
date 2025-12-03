@@ -660,7 +660,7 @@ class AdaptationMetrics(BaseMetrics):
             }
         )
     
-    def evaluate_disruption_recovery_time(self, 
+    def evaluate_disruption_recovery_time(self,
                                         disruption_times: List[float],
                                         recovery_times: List[float]) -> MetricResult:
         """Evaluate time to recover from disruptions"""
@@ -669,15 +669,15 @@ class AdaptationMetrics(BaseMetrics):
                 "recovery_time", MetricType.ADAPTATION,
                 0.0, "seconds", "No disruption/recovery data"
             )
-        
+
         recovery_durations = [
-            recovery_times[i] - disruption_times[i] 
+            recovery_times[i] - disruption_times[i]
             for i in range(min(len(disruption_times), len(recovery_times)))
         ]
-        
+
         avg_recovery_time = np.mean(recovery_durations)
         max_recovery_time = max(recovery_durations)
-        
+
         return self.add_result(
             "average_recovery_time", MetricType.ADAPTATION,
             avg_recovery_time, "seconds",
@@ -687,5 +687,183 @@ class AdaptationMetrics(BaseMetrics):
                 "recovery_times": recovery_times,
                 "recovery_durations": recovery_durations,
                 "max_recovery_time": max_recovery_time
+            }
+        )
+
+
+class CompensationMetrics(BaseMetrics):
+    """Compensation-specific metrics for saga pattern evaluation"""
+
+    def evaluate_compensation_rate(self,
+                                   total_actions: int,
+                                   compensated_actions: int) -> MetricResult:
+        """
+        Evaluate the rate of compensated actions
+
+        Args:
+            total_actions: Total number of actions executed
+            compensated_actions: Number of actions that were compensated (rolled back)
+        """
+        if total_actions == 0:
+            return self.add_result(
+                "compensation_rate", MetricType.ADAPTATION,
+                0.0, "percentage", "No actions executed"
+            )
+
+        compensation_rate = (compensated_actions / total_actions) * 100
+
+        return self.add_result(
+            "compensation_rate", MetricType.ADAPTATION,
+            compensation_rate, "percentage",
+            f"Compensation rate: {compensation_rate:.2f}%",
+            {
+                "total_actions": total_actions,
+                "compensated_actions": compensated_actions,
+                "successful_actions": total_actions - compensated_actions
+            }
+        )
+
+    def evaluate_recovery_success(self,
+                                  disruptions: List[Dict[str, Any]],
+                                  final_goals_achieved: List[str],
+                                  expected_goals: List[str]) -> MetricResult:
+        """
+        Evaluate recovery success after disruptions
+
+        Args:
+            disruptions: List of disruptions that occurred
+            final_goals_achieved: Goals achieved after recovery
+            expected_goals: Goals that were expected to be achieved
+        """
+        if not disruptions:
+            return self.add_result(
+                "recovery_success", MetricType.ADAPTATION,
+                100.0, "percentage", "No disruptions occurred"
+            )
+
+        if not expected_goals:
+            return self.add_result(
+                "recovery_success", MetricType.ADAPTATION,
+                0.0, "percentage", "No expected goals"
+            )
+
+        goals_achieved = len(set(final_goals_achieved) & set(expected_goals))
+        recovery_rate = (goals_achieved / len(expected_goals)) * 100
+
+        return self.add_result(
+            "recovery_success", MetricType.ADAPTATION,
+            recovery_rate, "percentage",
+            f"Recovery success rate: {recovery_rate:.2f}%",
+            {
+                "disruptions_count": len(disruptions),
+                "disruption_types": [d.get("type", "unknown") for d in disruptions],
+                "goals_achieved": final_goals_achieved,
+                "expected_goals": expected_goals,
+                "goals_recovered": goals_achieved
+            }
+        )
+
+    def evaluate_state_consistency(self,
+                                   action_history: List[Dict[str, Any]],
+                                   compensation_history: List[Dict[str, Any]],
+                                   final_state: Dict[str, Any]) -> MetricResult:
+        """
+        Evaluate state consistency after compensation
+
+        Args:
+            action_history: List of actions performed
+            compensation_history: List of compensation events
+            final_state: Final state after execution
+        """
+        # Check if compensated actions are properly reflected in final state
+        compensated_ids = set()
+        for comp in compensation_history:
+            if "action_id" in comp:
+                compensated_ids.add(comp["action_id"])
+            elif "job_id" in comp:
+                compensated_ids.add(comp["job_id"])
+            elif "vehicle_id" in comp:
+                compensated_ids.add(comp["vehicle_id"])
+            elif "resource_id" in comp:
+                compensated_ids.add(comp["resource_id"])
+
+        # Check if compensated items are not in final state
+        inconsistencies = 0
+        total_compensations = len(compensation_history)
+
+        if hasattr(final_state, 'scheduled_jobs'):
+            for job_id in final_state.scheduled_jobs:
+                if job_id in compensated_ids:
+                    inconsistencies += 1
+
+        if hasattr(final_state, 'assigned_vehicles'):
+            for vehicle_id in final_state.assigned_vehicles:
+                if vehicle_id in compensated_ids:
+                    inconsistencies += 1
+
+        if hasattr(final_state, 'allocated_resources'):
+            for resource_id in final_state.allocated_resources:
+                if resource_id in compensated_ids:
+                    inconsistencies += 1
+
+        if hasattr(final_state, 'deployed_teams'):
+            for team_id in final_state.deployed_teams:
+                if team_id in compensated_ids:
+                    inconsistencies += 1
+
+        consistency_rate = 100.0
+        if total_compensations > 0:
+            consistency_rate = ((total_compensations - inconsistencies) / total_compensations) * 100
+
+        return self.add_result(
+            "state_consistency", MetricType.COORDINATION_EFFECTIVENESS,
+            consistency_rate, "percentage",
+            f"State consistency: {consistency_rate:.2f}%",
+            {
+                "action_count": len(action_history),
+                "compensation_count": total_compensations,
+                "inconsistencies": inconsistencies,
+                "compensated_ids": list(compensated_ids)
+            }
+        )
+
+    def evaluate_compensation_efficiency(self,
+                                         compensation_events: List[Dict[str, Any]],
+                                         execution_time: float) -> MetricResult:
+        """
+        Evaluate efficiency of compensation mechanism
+
+        Args:
+            compensation_events: List of compensation events with timing
+            execution_time: Total execution time
+        """
+        if not compensation_events:
+            return self.add_result(
+                "compensation_efficiency", MetricType.RESOURCE_USAGE,
+                100.0, "percentage", "No compensations needed"
+            )
+
+        # Calculate compensation overhead
+        compensation_time = sum(
+            event.get("duration", 0.1) for event in compensation_events
+        )
+
+        if execution_time > 0:
+            overhead_rate = (compensation_time / execution_time) * 100
+        else:
+            overhead_rate = 0.0
+
+        # Efficiency is inverse of overhead (100% - overhead%)
+        efficiency = max(0.0, 100.0 - overhead_rate)
+
+        return self.add_result(
+            "compensation_efficiency", MetricType.RESOURCE_USAGE,
+            efficiency, "percentage",
+            f"Compensation efficiency: {efficiency:.2f}%",
+            {
+                "compensation_count": len(compensation_events),
+                "compensation_time": compensation_time,
+                "execution_time": execution_time,
+                "overhead_rate": overhead_rate
             }
         ) 

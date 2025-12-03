@@ -3,3 +3,4 @@ db/traces.db
 __pycache__
 .env
 .cache
+.venv_c
