@@ -3,12 +3,18 @@ Planning Tools for REALM-Bench P1-P11 Tasks
 
 This module provides compensatable tools for all 11 REALM-Bench planning scenarios.
 Each tool has a corresponding compensation (rollback) function.
+
+Supports failure injection for benchmark experiments.
 """
 
 import json
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from langchain_core.tools import tool
+
+# Global failure injection state (set by benchmark)
+_failure_injector = None
+_failure_enabled = False
 
 # ============================================================================
 # State Tracking (simulates actual resource states)
@@ -40,6 +46,12 @@ def reset_state():
 @tool
 def visit_location(location_id: str, arrival_time: str) -> str:
     """Visit a campus location at a specific time. Returns visit confirmation."""
+    # Check for failure injection (for benchmark experiments)
+    if _failure_enabled and _failure_injector:
+        if _failure_injector.should_fail("visit_location"):
+            failure_result = _failure_injector.inject_failure("visit_location", None)
+            return json.dumps(failure_result)
+    
     visit_id = f"visit_{location_id}_{int(time.time())}"
     _state["locations"][visit_id] = {
         "location_id": location_id,
