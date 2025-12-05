@@ -139,8 +139,8 @@ class DisruptionEngine:
                 affected_tool=mapping["tool"],
                 error_message=f"{mapping['message']}: {scenario}",
                 trigger=DisruptionTrigger.AFTER_N_ACTIONS,
-                trigger_after_n_actions=random.randint(1, 3),
-                probability=0.8  # 80% chance to trigger
+                trigger_after_n_actions=2,  # Trigger after 2nd action
+                probability=1.0  # 100% chance to trigger
             )
 
         return None

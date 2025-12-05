@@ -1,7 +1,7 @@
 """
 LangGraph router V2 using shared tools for fair comparison.
 
-Uses the new LangChain v1 create_agent API.
+Uses langchain.agents.create_agent for agent creation.
 """
 
 import os
@@ -35,7 +35,7 @@ class LangGraphRouterV2:
     """
     LangGraph router with shared tools (no automatic compensation).
 
-    Uses LangChain v1 create_agent API.
+    Uses langchain.agents.create_agent with a pre-initialized LLM.
     """
 
     def __init__(
@@ -75,22 +75,27 @@ class LangGraphRouterV2:
         # Get system prompt for task category
         self.system_prompt = get_prompt_for_category(task_definition.category)
 
-        # Initialize the model
+        # Initialize the model using langchain_google_genai (not Vertex)
         if model.startswith("gemini"):
             from langchain_google_genai import ChatGoogleGenerativeAI
             api_key = os.environ.get('GOOGLE_API_KEY')
-            llm = ChatGoogleGenerativeAI(model=model, temperature=0, google_api_key=api_key)
+            llm = ChatGoogleGenerativeAI(
+                model=model,
+                temperature=0,
+                google_api_key=api_key,
+                transport='rest',  # Use REST API, not gRPC (avoids Vertex AI auth)
+            )
         else:
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(model=model, temperature=0)
 
-        # Create the agent using LangChain v1 create_agent
+        # Create the agent using langchain.agents.create_agent
         from langchain.agents import create_agent
         self.agent = create_agent(
             model=llm,
             tools=self.tools,
             system_prompt=self.system_prompt,
-        )
+        ).with_config({"recursion_limit": 50})  # Limit tool calls to prevent infinite loops
 
     def run(self, query: str) -> Dict[str, Any]:
         """
@@ -111,6 +116,7 @@ class LangGraphRouterV2:
         # Reset state for fresh execution
         self.state_manager.reset()
         self.disruption_engine.reset()
+        self.disruption_engine.configure_from_task(self.task_definition)  # Re-configure after reset
 
         log_task_start(logger, self.task_definition.task_id, "langgraph_v2")
         start_time = time.time()

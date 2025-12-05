@@ -1,4 +1,4 @@
-"""Compensation tool: Return allocated supplies."""
+"""Tool to return allocated supplies."""
 
 from langchain_core.tools import tool
 
@@ -11,9 +11,7 @@ logger = get_logger("realm_bench.tools")
 @tool
 def return_supplies(allocation_id: str) -> str:
     """
-    Return previously allocated supplies (compensation action).
-
-    This is a COMPENSATION tool that reverses allocate_supplies.
+    Return supplies to the central pool, making them available for reallocation.
 
     Args:
         allocation_id: Unique identifier for the supply allocation

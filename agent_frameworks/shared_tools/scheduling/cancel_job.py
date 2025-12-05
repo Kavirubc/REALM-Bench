@@ -1,4 +1,4 @@
-"""Compensation tool: Cancel a scheduled job."""
+"""Tool to cancel a scheduled job."""
 
 from langchain_core.tools import tool
 
@@ -9,17 +9,15 @@ logger = get_logger("realm_bench.tools")
 
 
 @tool
-def cancel_job(job_id: str) -> str:
+def cancel_job(job_id: str) -> dict:
     """
-    Cancel a previously scheduled job (compensation action).
-
-    This is a COMPENSATION tool that reverses schedule_job.
+    Cancel a scheduled job and free up the machine time slot.
 
     Args:
         job_id: Unique identifier for the job to cancel
 
     Returns:
-        Status message indicating success or failure
+        Dict with status and cancellation details
     """
     state = StateManager()
 
@@ -39,15 +37,15 @@ def cancel_job(job_id: str) -> str:
         }, original_action="schedule_job")
 
         log_compensation(logger, "schedule_job", "cancel_job", f"Job {job_id} cancelled")
+        log_tool_result(logger, "cancel_job", True, f"Job {job_id} cancelled")
 
-        result = (
-            f"SUCCESS: Job {job_id} cancelled. "
-            f"Machine {cancelled_job.machine_id} freed from time "
-            f"{cancelled_job.start_time} to {cancelled_job.end_time}"
-        )
-        log_tool_result(logger, "cancel_job", True, result)
-        return result
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "machine_id": cancelled_job.machine_id,
+            "freed_start": cancelled_job.start_time,
+            "freed_end": cancelled_job.end_time
+        }
     else:
-        result = f"FAILED: Job {job_id} not found in schedule"
-        log_tool_result(logger, "cancel_job", False, result)
-        return result
+        log_tool_result(logger, "cancel_job", False, f"Job {job_id} not found")
+        return {"status": "error", "error": f"Job {job_id} not found in schedule", "job_id": job_id}

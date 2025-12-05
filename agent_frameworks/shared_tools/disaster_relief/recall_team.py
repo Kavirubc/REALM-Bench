@@ -1,4 +1,4 @@
-"""Compensation tool: Recall a deployed team."""
+"""Tool to recall a deployed team."""
 
 from langchain_core.tools import tool
 
@@ -11,9 +11,7 @@ logger = get_logger("realm_bench.tools")
 @tool
 def recall_team(deployment_id: str) -> str:
     """
-    Recall a deployed team from their mission (compensation action).
-
-    This is a COMPENSATION tool that reverses deploy_team.
+    Recall a team from their current deployment, making them available for new missions.
 
     Args:
         deployment_id: Unique identifier for the deployment

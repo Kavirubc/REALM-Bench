@@ -1,4 +1,4 @@
-"""Action tool: Schedule a job on a machine."""
+"""Tool to schedule a job on a machine."""
 
 from langchain_core.tools import tool
 
@@ -16,11 +16,9 @@ def schedule_job(
     start_time: int,
     duration: int,
     priority: int = 1
-) -> str:
+) -> dict:
     """
-    Schedule a job on a specific machine.
-
-    This is an ACTION tool that can be compensated by cancel_job.
+    Schedule a job on a specific machine at a given time slot.
 
     Args:
         job_id: Unique identifier for the job (e.g., "job_1", "J1")
@@ -30,7 +28,7 @@ def schedule_job(
         priority: Job priority, 1 is highest (default: 1)
 
     Returns:
-        Status message indicating success or failure with job details
+        Dict with status and job details
     """
     state = StateManager()
     disruption = DisruptionEngine()
@@ -50,7 +48,7 @@ def schedule_job(
 
     if disruption_error:
         log_tool_result(logger, "schedule_job", False, disruption_error)
-        return f"FAILED: {disruption_error}"
+        return {"status": "error", "error": disruption_error, "job_id": job_id}
 
     # Create job data
     job_data = {
@@ -68,13 +66,14 @@ def schedule_job(
 
     if success:
         state.record_action("schedule_job", job_data)
-        result = (
-            f"SUCCESS: Job {job_id} scheduled on machine {machine_id} "
-            f"from time {start_time} to {start_time + duration}"
-        )
-        log_tool_result(logger, "schedule_job", True, result)
-        return result
+        log_tool_result(logger, "schedule_job", True, f"Job {job_id} scheduled")
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "machine_id": machine_id,
+            "start_time": start_time,
+            "end_time": start_time + duration
+        }
     else:
-        result = f"FAILED: Job {job_id} already exists in schedule"
-        log_tool_result(logger, "schedule_job", False, result)
-        return result
+        log_tool_result(logger, "schedule_job", False, f"Job {job_id} already exists")
+        return {"status": "error", "error": f"Job {job_id} already exists in schedule", "job_id": job_id}

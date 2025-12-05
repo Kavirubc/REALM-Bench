@@ -522,7 +522,7 @@ class LangChainCompensationRunner(BaseFrameworkRunner):
         self.model = model
         self.router_class = None
         try:
-            from agent_frameworks.langchain_compensation.router import CompensationRouter
+            from agent_frameworks.compensation_router.router import CompensationRouter
             self.router_class = CompensationRouter
         except ImportError as e:
             print(f"Warning: langchain-compensation not available: {e}")

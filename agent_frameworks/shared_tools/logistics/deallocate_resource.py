@@ -1,4 +1,4 @@
-"""Compensation tool: Deallocate a resource."""
+"""Tool to deallocate a resource."""
 
 from langchain_core.tools import tool
 
@@ -11,9 +11,7 @@ logger = get_logger("realm_bench.tools")
 @tool
 def deallocate_resource(allocation_id: str) -> str:
     """
-    Deallocate a previously allocated resource (compensation action).
-
-    This is a COMPENSATION tool that reverses allocate_resource.
+    Deallocate a resource and return it to the available pool.
 
     Args:
         allocation_id: Unique identifier for the allocation to cancel

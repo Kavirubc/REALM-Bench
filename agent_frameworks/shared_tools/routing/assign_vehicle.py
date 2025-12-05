@@ -1,4 +1,4 @@
-"""Action tool: Assign a vehicle to a route or passenger."""
+"""Tool to assign a vehicle to a route or passenger."""
 
 from langchain_core.tools import tool
 from typing import Optional
@@ -21,9 +21,7 @@ def assign_vehicle(
     end_time: Optional[int] = None
 ) -> str:
     """
-    Assign a vehicle to a passenger or route.
-
-    This is an ACTION tool that can be compensated by unassign_vehicle.
+    Assign a vehicle to a passenger or route for transportation.
 
     Args:
         vehicle_id: Unique identifier for the vehicle (e.g., "vehicle_1", "V1")

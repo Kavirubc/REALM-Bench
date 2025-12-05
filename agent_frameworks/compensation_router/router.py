@@ -1,14 +1,13 @@
 """
 langchain-compensation router for REALM-Bench.
 
-Uses LangChain v1 create_agent with custom middleware for automatic compensation.
+Uses the langchain-compensation library for automatic rollback on failure.
 """
 
 import os
 import sys
 import time
-from typing import Dict, Any, List, Optional, Callable
-from dataclasses import dataclass
+from typing import Dict, Any, Optional
 
 from dotenv import load_dotenv
 
@@ -24,7 +23,6 @@ from shared_tools.logging_config import (
     get_logger,
     log_task_start,
     log_task_end,
-    log_compensation,
 )
 from prompt_templates.planning_template import get_prompt_for_category
 
@@ -33,27 +31,12 @@ load_dotenv()
 logger = get_logger("realm_bench.compensation")
 
 
-@dataclass
-class CompensationContext:
-    """Context for compensation middleware."""
-    executed_actions: List[Dict[str, Any]] = None
-    compensation_mapping: Dict[str, str] = None
-    tool_by_name: Dict[str, Callable] = None
-
-    def __post_init__(self):
-        if self.executed_actions is None:
-            self.executed_actions = []
-        if self.compensation_mapping is None:
-            self.compensation_mapping = {}
-        if self.tool_by_name is None:
-            self.tool_by_name = {}
-
-
 class CompensationRouter:
     """
-    Router using LangChain v1 create_agent with compensation middleware.
+    Router using langchain-compensation library for automatic rollback.
 
-    Provides automatic compensation (rollback) when tool calls fail.
+    When any tool fails, the library automatically compensates all
+    previously successful actions in reverse order.
     """
 
     def __init__(
@@ -86,140 +69,45 @@ class CompensationRouter:
         self.tools = get_tools_for_task(task_definition)
         self.compensation_mapping = get_compensation_mapping_for_task(task_definition)
 
-        # Build tool lookup by name
-        self._tool_by_name: Dict[str, Callable] = {}
-        for tool in self.tools:
-            name = getattr(tool, 'name', None) or getattr(tool, '__name__', str(tool))
-            self._tool_by_name[name] = tool
-
         logger.info(
             f"CompensationRouter initialized for task {task_definition.task_id}"
         )
-        logger.info(f"Tools: {list(self._tool_by_name.keys())}")
+        logger.info(f"Tools: {[getattr(t, 'name', str(t)) for t in self.tools]}")
         logger.info(f"Compensation mapping: {self.compensation_mapping}")
 
         # Get system prompt for task category
         self.system_prompt = get_prompt_for_category(task_definition.category)
 
-        # Track executed actions for compensation
-        self._executed_actions: List[Dict[str, Any]] = []
-
-        # Use original tools directly (compensation is tracked via state manager)
-        self._wrapped_tools = self.tools
-
         # Initialize the model
         if model.startswith("gemini"):
             from langchain_google_genai import ChatGoogleGenerativeAI
             api_key = os.environ.get('GOOGLE_API_KEY')
-            llm = ChatGoogleGenerativeAI(model=model, temperature=0, google_api_key=api_key)
+            llm = ChatGoogleGenerativeAI(
+                model=model,
+                temperature=0,
+                google_api_key=api_key,
+                transport='rest',  # Use REST API, not gRPC (avoids Vertex AI auth)
+            )
         else:
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(model=model, temperature=0)
 
-        # Create the agent using LangChain v1 create_agent
-        from langchain.agents import create_agent
-        self.agent = create_agent(
+        # Create the agent using langchain-compensation library
+        # This provides automatic rollback when tools fail
+        from langchain_compensation import create_comp_agent, ContentDictStrategy
+
+        self.agent = create_comp_agent(
             model=llm,
-            tools=self._wrapped_tools,
-            system_prompt=self.system_prompt,
+            tools=self.tools,
+            compensation_mapping=self.compensation_mapping,
+            error_strategies=[ContentDictStrategy()],
+            sequential_execution=True,  # Force sequential tool execution for Gemini
+            debug=True,  # Enable debug logging
         )
-
-    def _create_wrapped_tools(self) -> List[Callable]:
-        """Create wrapped tools that track actions and trigger compensation on failure."""
-        from langchain.tools import tool as tool_decorator
-
-        wrapped_tools = []
-
-        for original_tool in self.tools:
-            tool_name = getattr(original_tool, 'name', None) or getattr(original_tool, '__name__', str(original_tool))
-            tool_desc = getattr(original_tool, 'description', f"Tool: {tool_name}")
-
-            # Check if this is a compensation tool (don't wrap those)
-            is_compensation_tool = tool_name in self.compensation_mapping.values()
-
-            if is_compensation_tool:
-                # Keep compensation tools as-is
-                wrapped_tools.append(original_tool)
-            else:
-                # Wrap action tools to track and compensate on failure
-                wrapped_tools.append(self._wrap_tool(original_tool, tool_name))
-
-        return wrapped_tools
-
-    def _wrap_tool(self, original_tool: Callable, tool_name: str) -> Callable:
-        """Wrap a tool to track execution and trigger compensation on failure."""
-        from langchain_core.tools import StructuredTool
-
-        # Get the original function
-        if hasattr(original_tool, 'func'):
-            original_func = original_tool.func
-        elif hasattr(original_tool, '_run'):
-            original_func = original_tool._run
-        else:
-            original_func = original_tool
-
-        router = self  # Capture reference
-
-        def wrapped_func(**kwargs):
-            result = original_tool.invoke(kwargs)
-
-            # Track successful actions
-            if "SUCCESS" in str(result) and tool_name in router.compensation_mapping:
-                router._executed_actions.append({
-                    "tool_name": tool_name,
-                    "args": kwargs,
-                    "result": result,
-                })
-
-            # Check for failure - trigger compensation
-            if "FAILED" in str(result):
-                logger.info(f"Tool {tool_name} failed, triggering compensation")
-                router._trigger_compensation()
-
-            return result
-
-        # Create new tool with same signature
-        return StructuredTool.from_function(
-            func=wrapped_func,
-            name=tool_name,
-            description=getattr(original_tool, 'description', f"Tool: {tool_name}"),
-            args_schema=getattr(original_tool, 'args_schema', None),
-        )
-
-    def _trigger_compensation(self):
-        """Execute compensation for all previously successful actions (in reverse order)."""
-        for action in reversed(self._executed_actions):
-            tool_name = action["tool_name"]
-            comp_tool_name = self.compensation_mapping.get(tool_name)
-
-            if comp_tool_name and comp_tool_name in self._tool_by_name:
-                comp_tool = self._tool_by_name[comp_tool_name]
-
-                # Extract ID from original args for compensation
-                comp_args = {}
-                for key in ["job_id", "vehicle_id", "resource_id", "team_id", "task_id"]:
-                    if key in action["args"]:
-                        comp_args[key] = action["args"][key]
-
-                try:
-                    result = comp_tool.invoke(comp_args)
-                    log_compensation(
-                        logger,
-                        comp_tool_name,
-                        tool_name,
-                        comp_args,
-                        "SUCCESS" in str(result)
-                    )
-                    logger.info(f"Compensation {comp_tool_name}: {result}")
-                except Exception as e:
-                    logger.error(f"Compensation {comp_tool_name} failed: {e}")
-
-        # Clear action history after compensation
-        self._executed_actions.clear()
 
     def run(self, query: str) -> Dict[str, Any]:
         """
-        Execute the agent with compensation support.
+        Execute the agent with automatic compensation support.
 
         Args:
             query: Task description/query for the agent.
@@ -236,13 +124,13 @@ class CompensationRouter:
         # Reset state for fresh execution
         self.state_manager.reset()
         self.disruption_engine.reset()
-        self._executed_actions.clear()
+        self.disruption_engine.configure_from_task(self.task_definition)
 
         log_task_start(logger, self.task_definition.task_id, "langchain_compensation")
         start_time = time.time()
 
         try:
-            # Execute the agent
+            # Execute the agent - library handles compensation automatically
             result = self.agent.invoke({
                 "messages": [{"role": "user", "content": query}]
             })
@@ -305,7 +193,6 @@ def run_compensation_agent(query: str, task_definition=None) -> Dict[str, Any]:
         Execution result dictionary.
     """
     if task_definition is None:
-        # Create a minimal mock task definition for testing
         from dataclasses import dataclass
         from evaluation.task_definitions import TaskCategory
 

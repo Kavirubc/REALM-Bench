@@ -1,4 +1,4 @@
-"""Action tool: Allocate supplies to a region."""
+"""Tool to allocate supplies to a region."""
 
 from langchain_core.tools import tool
 from typing import Optional
@@ -19,9 +19,7 @@ def allocate_supplies(
     transport_method: Optional[str] = None
 ) -> str:
     """
-    Allocate supplies to a disaster region.
-
-    This is an ACTION tool that can be compensated by return_supplies.
+    Allocate supplies to a disaster region for relief operations.
 
     Args:
         supply_type: Type of supplies (e.g., "medical", "food", "water", "shelter")

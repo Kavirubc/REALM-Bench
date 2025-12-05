@@ -1,4 +1,4 @@
-"""Compensation tool: Unassign a vehicle."""
+"""Tool to unassign a vehicle."""
 
 from langchain_core.tools import tool
 
@@ -11,9 +11,7 @@ logger = get_logger("realm_bench.tools")
 @tool
 def unassign_vehicle(assignment_id: str) -> str:
     """
-    Unassign a vehicle from its current assignment (compensation action).
-
-    This is a COMPENSATION tool that reverses assign_vehicle.
+    Unassign a vehicle from its current assignment, making it available again.
 
     Args:
         assignment_id: Unique identifier for the assignment to cancel

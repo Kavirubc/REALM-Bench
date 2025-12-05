@@ -1,4 +1,4 @@
-"""Compensation tool: Unassign a task."""
+"""Tool to unassign a task."""
 
 from langchain_core.tools import tool
 
@@ -11,9 +11,7 @@ logger = get_logger("realm_bench.tools")
 @tool
 def unassign_task(assignment_id: str) -> str:
     """
-    Unassign a task from its current assignee (compensation action).
-
-    This is a COMPENSATION tool that reverses assign_task.
+    Unassign a task from its current assignee, making the task available for reassignment.
 
     Args:
         assignment_id: Unique identifier for the task assignment

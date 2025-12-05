@@ -8,6 +8,9 @@ langchain-openai>=0.2.0
 langchain-google-genai>=2.0.0
 langgraph>=0.2.39
 
+# Compensation middleware library
+langchain-compensation>=0.4.1
+
 # Other agent frameworks (optional - for comparison)
 # git+https://github.com/openai/swarm.git@main#egg=swarm
 # autogen~=0.2

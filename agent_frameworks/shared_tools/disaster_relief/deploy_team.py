@@ -1,4 +1,4 @@
-"""Action tool: Deploy a relief team."""
+"""Tool to deploy a relief team."""
 
 from langchain_core.tools import tool
 from typing import Optional, Dict
@@ -19,9 +19,7 @@ def deploy_team(
     supplies: Optional[Dict[str, int]] = None
 ) -> str:
     """
-    Deploy a relief team to a region.
-
-    This is an ACTION tool that can be compensated by recall_team.
+    Deploy a relief team to a specified region for a mission.
 
     Args:
         team_id: Unique identifier for the team (e.g., "team_1", "medical_team_A")

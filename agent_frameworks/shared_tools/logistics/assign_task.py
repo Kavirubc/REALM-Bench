@@ -1,4 +1,4 @@
-"""Action tool: Assign a task to an agent."""
+"""Tool to assign a task to an agent."""
 
 from langchain_core.tools import tool
 from typing import Optional, List
@@ -19,9 +19,7 @@ def assign_task(
     dependencies: Optional[List[str]] = None
 ) -> str:
     """
-    Assign a task to an agent or person.
-
-    This is an ACTION tool that can be compensated by unassign_task.
+    Assign a task to an agent or person for execution.
 
     Args:
         task_id: Unique identifier for the task (e.g., "cook_turkey", "pickup_flowers")

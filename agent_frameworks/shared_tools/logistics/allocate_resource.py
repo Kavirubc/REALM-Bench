@@ -1,4 +1,4 @@
-"""Action tool: Allocate a resource."""
+"""Tool to allocate a resource."""
 
 from langchain_core.tools import tool
 from typing import Optional
@@ -18,9 +18,7 @@ def allocate_resource(
     allocated_by: Optional[str] = None
 ) -> str:
     """
-    Allocate a resource to a destination.
-
-    This is an ACTION tool that can be compensated by deallocate_resource.
+    Allocate a resource to a specific destination.
 
     Args:
         resource_type: Type of resource (e.g., "medical_supplies", "food", "water")
