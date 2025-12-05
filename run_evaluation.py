@@ -43,7 +43,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from evaluation.evaluator import BenchmarkEvaluator, EvaluationConfig
-from evaluation.framework_runners import get_framework_runners, create_mock_runner, LangGraphRunnerV2, LangChainCompensationRunner
+from evaluation.framework_runners import get_framework_runners, create_mock_runner, LangGraphRunnerV2, LangChainCompensationRunner, SagaLLMRunner
 from evaluation.task_definitions import TASK_DEFINITIONS
 
 
@@ -203,6 +203,7 @@ def main():
         framework_runners = {
             'langgraph': LangGraphRunnerV2(model=model),
             'langchain_compensation': LangChainCompensationRunner(model=model),
+            'saga_llm': SagaLLMRunner(model=model),
         }
         available_frameworks = list(framework_runners.keys())
     

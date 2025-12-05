@@ -514,6 +514,115 @@ Use the available tools to schedule jobs, assign vehicles, allocate resources, e
         return []
 
 
+class SagaLLMRunner(BaseFrameworkRunner):
+    """Runner for SagaLLM framework with explicit SAGA-style rollback"""
+
+    def __init__(self, model: str = "gemini-2.0-flash"):
+        super().__init__()
+        self.model = model
+        self.router_class = None
+        try:
+            from agent_frameworks.saga_llm.router import SagaLLMRouter
+            self.router_class = SagaLLMRouter
+        except ImportError as e:
+            print(f"Warning: SagaLLM not available: {e}")
+
+    def __call__(self, task_definition: TaskDefinition) -> Dict[str, Any]:
+        """Execute task using SagaLLM with SAGA-style rollback"""
+        if not self.router_class:
+            raise RuntimeError("SagaLLM framework not available")
+
+        start_time = time.time()
+        self._record_memory_usage()
+
+        try:
+            router = self.router_class(task_definition, model=self.model)
+            query = self._build_task_query(task_definition)
+            result = router.run(query)
+
+            execution_time = time.time() - start_time
+            self.execution_times.append(execution_time)
+            self._record_memory_usage()
+
+            return self._create_execution_result(
+                achieved_goals=self._extract_achieved_goals(result, task_definition),
+                satisfied_constraints=self._extract_satisfied_constraints(result, task_definition),
+                schedule=self._extract_schedule(result),
+                disruptions_handled=result.get("disruptions_triggered", []),
+                replanning_attempts=result.get("compensation_events", [])
+            )
+
+        except Exception as e:
+            print(f"SagaLLM execution error: {str(e)}")
+            traceback.print_exc()
+            return self._create_execution_result([], [], [])
+
+    def _build_task_query(self, task_definition: TaskDefinition) -> str:
+        """Build task query from definition"""
+        goals_str = "\n".join([f"- {g.description}" for g in task_definition.goals])
+        constraints_str = "\n".join([f"- {c.description}" for c in task_definition.constraints])
+        return f"""
+Execute the following planning task:
+
+Task: {task_definition.name}
+Description: {task_definition.description}
+
+Goals:
+{goals_str}
+
+Constraints:
+{constraints_str}
+
+Resources Available:
+{task_definition.resources}
+
+Create and execute a plan to achieve these goals while respecting constraints.
+Use the available tools to schedule jobs, assign vehicles, allocate resources, etc.
+If a tool fails, the SAGA pattern will rollback all previous actions automatically.
+"""
+
+    def _extract_achieved_goals(self, result: Dict[str, Any], task_def: TaskDefinition) -> List[str]:
+        """Extract achieved goals from result"""
+        achieved = []
+        final_state = result.get("final_state")
+        if final_state and result.get("success"):
+            if hasattr(final_state, 'scheduled_jobs') and final_state.scheduled_jobs:
+                achieved.append("minimize_makespan")
+            if hasattr(final_state, 'assigned_vehicles') and final_state.assigned_vehicles:
+                achieved.append("serve_all_passengers")
+            if hasattr(final_state, 'deployed_teams') and final_state.deployed_teams:
+                achieved.append("maximize_aid_delivery")
+            if hasattr(final_state, 'allocated_resources') and final_state.allocated_resources:
+                achieved.append("optimize_resource_allocation")
+        return achieved
+
+    def _extract_satisfied_constraints(self, result: Dict[str, Any], task_def: TaskDefinition) -> List[str]:
+        """Extract satisfied constraints from result"""
+        satisfied = []
+        if result.get("success"):
+            compensation_events = result.get("compensation_events", [])
+            if not compensation_events:
+                satisfied = [c.constraint_id for c in task_def.constraints]
+            else:
+                satisfied = [c.constraint_id for c in task_def.constraints[:1]]
+        return satisfied
+
+    def _extract_schedule(self, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract schedule from result"""
+        final_state = result.get("final_state")
+        if final_state and hasattr(final_state, 'scheduled_jobs'):
+            return [
+                {
+                    "job_id": job.job_id,
+                    "machine_id": job.machine_id,
+                    "start_time": job.start_time,
+                    "end_time": job.end_time
+                }
+                for job in final_state.scheduled_jobs.values()
+            ]
+        return []
+
+
 class LangChainCompensationRunner(BaseFrameworkRunner):
     """Runner for langchain-compensation framework with automatic rollback"""
 
@@ -637,6 +746,11 @@ def get_framework_runners() -> Dict[str, BaseFrameworkRunner]:
         runners['langchain_compensation'] = LangChainCompensationRunner()
     except Exception as e:
         print(f"langchain-compensation runner not available: {e}")
+
+    try:
+        runners['saga_llm'] = SagaLLMRunner()
+    except Exception as e:
+        print(f"SagaLLM runner not available: {e}")
 
     # Legacy runners (original implementations)
     try:

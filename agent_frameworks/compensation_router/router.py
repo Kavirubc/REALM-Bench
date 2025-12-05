@@ -103,7 +103,10 @@ class CompensationRouter:
             error_strategies=[ContentDictStrategy()],
             sequential_execution=True,  # Force sequential tool execution for Gemini
             debug=True,  # Enable debug logging
-        )
+        ).with_config({
+            "run_name": f"LangChain-Compensation-{task_definition.task_id}",
+            "tags": ["langchain-compensation", "auto-rollback", task_definition.task_id],
+        })
 
     def run(self, query: str) -> Dict[str, Any]:
         """

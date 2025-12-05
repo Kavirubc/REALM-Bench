@@ -95,7 +95,11 @@ class LangGraphRouterV2:
             model=llm,
             tools=self.tools,
             system_prompt=self.system_prompt,
-        ).with_config({"recursion_limit": 50})  # Limit tool calls to prevent infinite loops
+        ).with_config({
+            "recursion_limit": 50,
+            "run_name": f"LangGraph-{task_definition.task_id}",
+            "tags": ["langgraph", "no-compensation", task_definition.task_id],
+        })
 
     def run(self, query: str) -> Dict[str, Any]:
         """
